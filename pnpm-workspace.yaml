@@ -1,6 +1,9 @@
 packages:
   - vendor/*
   - packages/*/*
+  # In-tree editor capability plugins (source-launched through a profile
+  # patch row pointing at src/index.ts; not part of the published set).
+  - editors/*
   # The Landlock launcher is developed with its harness consumers but keeps
   # its native build and publication scripts under native/system.
   - native/system
