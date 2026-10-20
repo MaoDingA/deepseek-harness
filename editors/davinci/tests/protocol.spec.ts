@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  addRenderJobFrom,
+  audioTimelineItemsFrom,
   clampTimeout,
   findByTcFrom,
   findClipFrom,
@@ -7,6 +9,8 @@ import {
   mutationFrom,
   parseOutput,
   projectInfoFrom,
+  renderingControlFrom,
+  renderStatusFrom,
   seekFrom,
   stripBanner,
   switchTimelineFrom,
@@ -220,6 +224,65 @@ describe('projections', () => {
       ok: false,
       code: 'api-failed',
     })
+  })
+
+  it('audioTimelineItemsFrom mirrors the video-track rows for the audio side', () => {
+    const info = audioTimelineItemsFrom(fieldsOf([
+      ['total', '1'],
+      ['shown', '1'],
+      ['item_1_name', '0130 4ji.wav'],
+      ['item_1_start', '0'],
+      ['item_1_end', '73862'],
+      ['item_1_srctc', '03:00:00:00'],
+    ]))
+    expect(info).toEqual({
+      total: 1,
+      shown: 1,
+      items: [{ name: '0130 4ji.wav', startFrame: 0, endFrame: 73862, sourceTc: '03:00:00:00' }],
+    })
+  })
+
+  it('renderStatusFrom reads the live render-engine facts', () => {
+    expect(renderStatusFrom(fieldsOf([
+      ['job_count', '2'],
+      ['first_job_name', 'EP04_20260129'],
+      ['is_rendering', 'false'],
+      ['cur_format', 'MP4'],
+      ['cur_codec_count', '3'],
+    ]))).toEqual({
+      jobCount: 2,
+      isRendering: false,
+      currentFormat: 'MP4',
+      currentCodec: undefined,
+      codecCount: 3,
+    })
+    expect(renderStatusFrom(fieldsOf([['job_count', '0'], ['is_rendering', 'true']]))).toEqual({
+      jobCount: 0,
+      isRendering: true,
+      currentFormat: undefined,
+      currentCodec: undefined,
+      codecCount: undefined,
+    })
+  })
+
+  it('addRenderJobFrom maps a Resolve refusal to an api-failed result', () => {
+    expect(addRenderJobFrom(fieldsOf([['ok', 'true'], ['job_id', 'job-1'], ['job_count', '1'], ['first_job_name', 'EP04_20260129']]))).toEqual({
+      ok: true,
+      data: { jobCount: 1, firstJobName: 'EP04_20260129' },
+    })
+    expect(addRenderJobFrom(fieldsOf([['ok', 'false']]))).toMatchObject({ ok: false, code: 'api-failed' })
+  })
+
+  it('renderingControlFrom reads the control outcome for both start and stop', () => {
+    expect(renderingControlFrom(fieldsOf([['done', 'true'], ['is_rendering', 'true']]), 'StartRendering')).toEqual({
+      ok: true,
+      data: { done: true },
+    })
+    expect(renderingControlFrom(fieldsOf([['done', 'true'], ['is_rendering', 'false']]), 'StopRendering')).toEqual({
+      ok: true,
+      data: { done: true },
+    })
+    expect(renderingControlFrom(fieldsOf([['done', 'false']]), 'StartRendering')).toMatchObject({ ok: false, code: 'api-failed' })
   })
 
   it('mutationFrom maps a Resolve refusal to an api-failed result', () => {

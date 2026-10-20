@@ -162,6 +162,50 @@ export interface DavinciDeleteRequest {
   readonly startFrame: number
 }
 
+/** One timeline audio-track item, in record-frame coordinates (mirror of the video-track row). */
+export interface DavinciAudioItemInfo {
+  readonly name: string
+  readonly startFrame: number
+  readonly endFrame: number
+  readonly sourceTc: string | undefined
+}
+
+/** A paged audio-track listing: windowed rows plus full-window counts. */
+export interface DavinciAudioTimelineItemsInfo {
+  readonly total: number
+  readonly shown: number
+  readonly items: readonly DavinciAudioItemInfo[]
+}
+
+/**
+ * Render-engine facts: the queued-job count, the live render flag, and the
+ * active format/codec surface. The codec count reflects the active format's
+ * available codecs (empty on the 20.3.2.9 build probed in this project).
+ */
+export interface DavinciRenderStatusInfo {
+  readonly jobCount: number
+  readonly isRendering: boolean
+  readonly currentFormat: string | undefined
+  readonly currentCodec: string | undefined
+  readonly codecCount: number | undefined
+}
+
+/** Queued render job, as read from Resolve after enqueue (may be empty list if Resolve reports no rows yet). */
+export interface DavinciRenderJobInfo {
+  readonly jobCount: number
+  readonly firstJobName: string | undefined
+}
+
+/** Add-render-job request: enqueue the current timeline into the render queue. */
+export interface DavinciAddRenderJobRequest {
+  readonly targetDir: string
+}
+
+/** Request to start or stop background rendering. */
+export interface DavinciRenderingControlRequest {
+  readonly jobIds: readonly string[] | undefined
+}
+
 /**
  * Marker colors accepted by `Timeline:AddMarker`. Keep in sync with the
  * runtime `DAVINCI_MARKER_COLORS` list in the provider.

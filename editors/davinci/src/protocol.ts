@@ -7,6 +7,8 @@
  */
 
 import type {
+  DavinciAudioItemInfo,
+  DavinciAudioTimelineItemsInfo,
   DavinciBinSummary,
   DavinciClipInfo,
   DavinciFindClipHitInfo,
@@ -16,6 +18,8 @@ import type {
   DavinciMediaPoolInfo,
   DavinciMutationInfo,
   DavinciProjectInfo,
+  DavinciRenderJobInfo,
+  DavinciRenderStatusInfo,
   DavinciResult,
   DavinciSeekInfo,
   DavinciTcHitInfo,
@@ -183,6 +187,77 @@ export function mediaPoolFrom(fields: ReadonlyMap<string, string>): DavinciMedia
     filePath: row.path,
   }))
   return { bins, clips }
+}
+
+/**
+ * Project audio-timeline-item fields (mirror of the video-track rows).
+ * @param fields - parsed kv fields from the audio-track-listing body.
+ * @returns windowed items plus total/shown counts.
+ */
+export function audioTimelineItemsFrom(fields: ReadonlyMap<string, string>): DavinciAudioTimelineItemsInfo {
+  const total = numeric(fields, 'total') ?? 0
+  const shown = numeric(fields, 'shown') ?? 0
+  const listed = Math.min(shown, MAX_LISTED_ITEMS)
+  const items: DavinciAudioItemInfo[] = indexedRows(
+    fields,
+    'item',
+    listed,
+    ['name', 'start', 'end', 'srctc'],
+  ).map((row) => ({
+    name: row.name ?? '',
+    startFrame: Number(row.start ?? 0),
+    endFrame: Number(row.end ?? 0),
+    sourceTc: row.srctc,
+  }))
+  return { total, shown, items }
+}
+
+/**
+ * Project render-status fields: the live render-engine state, not a queued-job list.
+ * @param fields - parsed kv fields from the render-status body.
+ * @returns job count and the active rendering flag.
+ */
+export function renderStatusFrom(fields: ReadonlyMap<string, string>): DavinciRenderStatusInfo {
+  return {
+    jobCount: numeric(fields, 'job_count') ?? 0,
+    isRendering: fields.get('is_rendering') === 'true',
+    currentFormat: text(fields, 'cur_format'),
+    currentCodec: text(fields, 'cur_codec'),
+    codecCount: numeric(fields, 'cur_codec_count'),
+  }
+}
+
+/**
+ * Project add-render-job fields: the queue outcome and current timeline name.
+ * @param fields - parsed kv fields from the add-render-job body.
+ * @returns the enqueue outcome plus the timeline being enqueued.
+ */
+export function addRenderJobFrom(fields: ReadonlyMap<string, string>): DavinciResult<DavinciRenderJobInfo> {
+  const ok = fields.get('ok') === 'true'
+  if (!ok) {
+    return { ok: false, code: 'api-failed', message: `Resolve returned false for AddRenderJob; nothing was queued` }
+  }
+  return {
+    ok: true,
+    data: {
+      jobCount: numeric(fields, 'job_count') ?? 1,
+      firstJobName: text(fields, 'first_job_name'),
+    },
+  }
+}
+
+/**
+ * Project rendering-control (start/stop) fields: the live engine flag after the call.
+ * @param fields - parsed kv fields from the start/stop-rendering body.
+ * @param op - operation name for the refusal message (`StartRendering` or `StopRendering`).
+ * @returns the control outcome; a Resolve refusal is an `api-failed` failure.
+ */
+export function renderingControlFrom(fields: ReadonlyMap<string, string>, op: string): DavinciResult<DavinciMutationInfo> {
+  const done = fields.get('done') === 'true'
+  if (!done) {
+    return { ok: false, code: 'api-failed', message: `Resolve returned false for ${op}; rendering state is unchanged` }
+  }
+  return { ok: true, data: { done } }
 }
 
 /**

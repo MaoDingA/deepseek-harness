@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, readdirSync } from 'node:fs'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, dirname } from 'node:path'
 import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -154,12 +154,59 @@ export class FuscriptDavinci extends DavinciService {
 export default FuscriptDavinci
 
 /**
+ * Derive the `.app` bundle path that ships a given `fuscript` host:
+ * `<app>/Contents/Libraries/Fusion/fuscript`.
+ * @param fuscriptPath - absolute fuscript path.
+ * @returns the absolute `.app` path.
+ */
+export function appPathFromFuscript(fuscriptPath: string): string {
+  return dirname(dirname(dirname(fuscriptPath)))
+}
+
+/** Bundle identifier macOS reports for DaVinci Resolve. */
+const RESOLVE_BUNDLE_ID = 'com.blackmagic-design.DaVinciResolve'
+
+/**
+ * Name the frontmost application's bundle id via `lsappinfo`, which needs no
+ * accessibility grant.
+ * @returns the bundle id, or '' when the query yields nothing parseable.
+ */
+async function frontmostBundleId(): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync('lsappinfo', ['info', '-only', 'bundleid', 'front'], { timeout: 5_000 })
+    const match = /["']([A-Za-z0-9.\-]+)["']/.exec(stdout)
+    return match?.[1] ?? ''
+  } catch {
+    return ''
+  }
+}
+
+/**
  * Capture the screen to a fresh PNG under the configured screenshot directory.
+ * Refuses unless DaVinci Resolve is the frontmost app — the capture otherwise
+ * shows whatever covers it — activating it first when asked to.
  * @param screenshotDir - configured directory, resolved against the working
  *   directory by the caller.
+ * @param options - `fuscriptForActivation` activates the Resolve install that
+ *   ships that fuscript before the foreground check.
  * @returns the absolute path of the written PNG.
+ * @throws when Resolve is not frontmost after any activation attempt.
  */
-export async function captureScreenshot(screenshotDir: string): Promise<string> {
+export async function captureScreenshot(
+  screenshotDir: string,
+  options: { fuscriptForActivation?: string | undefined } = {},
+): Promise<string> {
+  if (options.fuscriptForActivation !== undefined) {
+    await execFileAsync('open', [appPathFromFuscript(options.fuscriptForActivation)], { timeout: 10_000 })
+    await new Promise((r) => setTimeout(r, 800))
+  }
+  const front = await frontmostBundleId()
+  if (front !== RESOLVE_BUNDLE_ID) {
+    throw new Error(
+      `screenshot skipped: the frontmost app is ${front || 'unknown'}, not DaVinci Resolve — the capture would show the covering window. `
+      + 'Ask the user to bring Resolve to the front, or retry with activate: true.',
+    )
+  }
   const dir = resolve(screenshotDir)
   await mkdir(dir, { recursive: true })
   const png = join(dir, `screen-${randomUUID()}.png`)

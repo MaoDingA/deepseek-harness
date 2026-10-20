@@ -10,28 +10,39 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import {
   addMarkerLua,
+  addRenderJobLua,
+  audioTimelineItemsLua,
   deleteItemLua,
   findByTcLua,
   findClipLua,
   mediaPoolLua,
   placeLua,
   projectInfoLua,
+  renderStatusLua,
   seekLua,
+  startRenderingLua,
+  stopRenderingLua,
   switchTimelineLua,
   timelineItemsLua,
 } from './lua.ts'
 import {
+  addRenderJobFrom,
+  audioTimelineItemsFrom,
   findByTcFrom,
   findClipFrom,
   mediaPoolFrom,
   mutationFrom,
   parseOutput,
   projectInfoFrom,
+  renderingControlFrom,
+  renderStatusFrom,
   seekFrom,
   switchTimelineFrom,
   timelineItemsFrom,
 } from './protocol.ts'
 import type {
+  DavinciAddRenderJobRequest,
+  DavinciAudioTimelineItemsInfo,
   DavinciCallRequest,
   DavinciDeleteRequest,
   DavinciFindClipInfo,
@@ -41,6 +52,9 @@ import type {
   DavinciMutationInfo,
   DavinciPlaceRequest,
   DavinciProjectInfo,
+  DavinciRenderingControlRequest,
+  DavinciRenderJobInfo,
+  DavinciRenderStatusInfo,
   DavinciResult,
   DavinciSeekInfo,
   DavinciSpec,
@@ -223,6 +237,71 @@ export abstract class DavinciService extends Service {
    */
   async addMarker(marker: DavinciMarkerRequest, request: DavinciCallRequest = {}): Promise<DavinciResult<DavinciMutationInfo>> {
     return this.run(addMarkerLua(marker), request, (fields) => mutationFrom(fields, 'AddMarker'))
+  }
+
+  /**
+   * List one audio track's items, optionally windowed by record frames.
+   * Mirror of {@link timelineItems} for the audio side (the 套片 audio delivery
+   * lands on A1).
+   * @param trackIndex - 1-based audio track index (A1=1).
+   * @param from - record-frame lower bound, if any.
+   * @param to - record-frame upper bound, if any.
+   * @param request - call envelope.
+   * @returns windowed items plus total/shown counts, or a coded failure.
+   */
+  async audioTimelineItems(
+    trackIndex: number,
+    from: number | undefined,
+    to: number | undefined,
+    request: DavinciCallRequest = {},
+  ): Promise<DavinciResult<DavinciAudioTimelineItemsInfo>> {
+    return this.run(audioTimelineItemsLua(trackIndex, from, to), request, (fields) => ({
+      ok: true,
+      data: audioTimelineItemsFrom(fields),
+    }))
+  }
+
+  /**
+   * Read the live render-engine state (queued-job count, is-rendering flag,
+   * current format/codec and codec count) without touching the queue.
+   * @param request - call envelope.
+   * @returns the render-engine facts or a coded failure.
+   */
+  async renderStatus(request: DavinciCallRequest = {}): Promise<DavinciResult<DavinciRenderStatusInfo>> {
+    return this.run(renderStatusLua(), request, (fields) => ({ ok: true, data: renderStatusFrom(fields) }))
+  }
+
+  /**
+   * Enqueue the current timeline into the render queue at `targetDir`. The
+   * current render preset/format/codec are preserved (this Resolve 20.3.2.9
+   * build has no presets and an empty format list, so the UI-set active
+   * render settings are the only selectable surface).
+   * @param placement - the enqueue coordinates.
+   * @param request - call envelope.
+   * @returns the enqueue outcome plus the enqueued timeline name, or a coded failure.
+   */
+  async addRenderJob(placement: DavinciAddRenderJobRequest, request: DavinciCallRequest = {}): Promise<DavinciResult<DavinciRenderJobInfo>> {
+    return this.run(addRenderJobLua(placement), request, addRenderJobFrom)
+  }
+
+  /**
+   * Start the render engine (optionally scoped to a set of job ids).
+   * @param request - the rendering control (job ids or whole queue).
+   * @param envelope - call envelope.
+   * @returns the control outcome; `null` is reported as a Resolve refusal.
+   */
+  async startRendering(request: DavinciRenderingControlRequest, envelope: DavinciCallRequest = {}): Promise<DavinciResult<DavinciMutationInfo>> {
+    return this.run(startRenderingLua(request), envelope, (fields) => renderingControlFrom(fields, 'StartRendering'))
+  }
+
+  /**
+   * Stop the render engine (optionally scoped to a set of job ids).
+   * @param request - the rendering control (job ids or whole queue).
+   * @param envelope - call envelope.
+   * @returns the control outcome; `null` is reported as a Resolve refusal.
+   */
+  async stopRendering(request: DavinciRenderingControlRequest, envelope: DavinciCallRequest = {}): Promise<DavinciResult<DavinciMutationInfo>> {
+    return this.run(stopRenderingLua(request), envelope, (fields) => renderingControlFrom(fields, 'StopRendering'))
   }
 }
 

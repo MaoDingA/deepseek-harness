@@ -11,13 +11,16 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 // Type-only: makes `ctx.get('approval')` resolve to the ApprovalService
 // augmentation. The seam stays optional at runtime.
 import type {} from '@deepseek-ai/dsh-user-approval'
-import { captureScreenshot, DAVINCI_MARKER_COLORS, type Config } from './provider.ts'
+import { captureScreenshot, DAVINCI_MARKER_COLORS, discoverFuscript, type Config } from './provider.ts'
 import type {
+  DavinciAudioTimelineItemsInfo,
   DavinciFindClipInfo,
   DavinciFindByTcInfo,
   DavinciMediaPoolInfo,
   DavinciMutationInfo,
   DavinciProjectInfo,
+  DavinciRenderJobInfo,
+  DavinciRenderStatusInfo,
   DavinciResult,
   DavinciSeekInfo,
   DavinciTimelineItemsInfo,
@@ -81,8 +84,14 @@ const RESOLVE_SECTION = `DaVinci Resolve editing conventions:
 - Timeline tools operate on the timeline current in Resolve; use resolve_switch_timeline (1-based index or exact name from resolve_project_info) to change which timeline they target.
 - Frame math uses the current timeline's fps; convert timecodes to frames with that fps before comparing positions.
 - To match a VFX deliverable to its timeline segment, prefer resolve_find_by_tc with the deliverable's source Start TC over paging resolve_timeline_items.
-- Mutating tools (place/delete/marker) are approval-gated one-shot: the approval prompt is how the user consents, so never detour through chat to ask permission first, and never retry a rejected mutation unchanged.
-- After any mutation, re-read the affected track with resolve_timeline_items to confirm the result before reporting success.`
+- Group vocabulary (this show's delivery vocabulary, inferred from the running project):
+  - 套片 (sao pian) = two sub-flows:
+    a. 音画合套 (audio-picture conformance): the show ships picture cut as separate V1 segments (camcorder MXFs) plus one long audio delivery (SOUNDS/*.wav, roughly one episode of final mix). The picture segments are already on V1; the 套片 step is (1) confirming the A1 delivery covers each V1 segment frame-accurately and (2) flagging any V1 segment whose picture does not line up with the A1 mix (typically a scene re-cut after the mix was finalized). Read the A1 items first with resolve_audio_timeline_items and compare against V1 with resolve_timeline_items; resolve_find_by_tc is the TC-side match when the A1 has a continuous Start TC.
+    b. 嵌套组装 (nested assembly): the show ships the cut as a nested timeline (a timeline named after the delivery date, e.g. "EP04_20260129", imported into a parent timeline as a single item on V1). 套片 in this form = "place the nested timeline onto the parent timeline at the right record frame". Use resolve_place_clip with the TL bin (nested-timeline items live there) or a fresh nested clip from SOUNDS as the picture; use resolve_delete_item / resolve_add_marker when cleaning stray duplicates.
+  - 贴视效 (tie shi xiao) = paste VFX deliverables (VFX/*.mov, e.g. ZY_EP05_1630_CMP_v002.mov) from the VFX bin onto V2 aligned to the matching V1 segment's start frame (the V2-paste convention already encoded in resolve_place_clip's description). The deliverable's source Start TC is the matching anchor; prefer resolve_find_by_tc over paging.
+  - 输出 (shu chu) = the render-queue flow: confirm current render settings with resolve_render_status, enqueue the current timeline with resolve_add_render_job (targetDir required), start with resolve_start_rendering, stop with resolve_stop_rendering. This Resolve 20.3.2.9 build has no presets and an empty GetRenderFormats — the active UI-set render settings are the only selectable surface; changing them requires the Resolve Deliver page or a fuscript outside this plugin.
+- Mutating tools (place/delete/marker/render-queue/render-control) are approval-gated one-shot: the approval prompt is how the user consents, so never detour through chat to ask permission first, and never retry a rejected mutation unchanged.
+- After any mutation, re-read the affected state with resolve_timeline_items or resolve_render_status to confirm the result before reporting success.`
 
 function resultText<T>(result: DavinciResult<T>, format: (data: T) => string): string {
   if (!result.ok) return `ERROR [${result.code}] ${result.message}`
@@ -155,6 +164,33 @@ function switchTimelineText(info: DavinciTimelineSwitchInfo): string {
 
 function mutationText(_info: DavinciMutationInfo): string {
   return 'done'
+}
+
+function audioTimelineItemsText(info: DavinciAudioTimelineItemsInfo): string {
+  const lines = info.items.map((item) =>
+    `item: ${item.name}  [${item.startFrame}-${item.endFrame}]  srcTC=${item.sourceTc ?? '?'}`)
+  lines.push(`total=${info.total} shown=${info.shown}`)
+  if (info.shown > info.items.length) lines.push('(window truncated — page with from/to)')
+  return lines.join('\n')
+}
+
+function renderStatusText(info: DavinciRenderStatusInfo): string {
+  const lines = [
+    `job_count=${info.jobCount}`,
+    `is_rendering=${info.isRendering}`,
+  ]
+  if (info.currentFormat !== undefined) lines.push(`current_format=${info.currentFormat}`)
+  if (info.currentCodec !== undefined) lines.push(`current_codec=${info.currentCodec}`)
+  if (info.codecCount !== undefined) lines.push(`codec_count=${info.codecCount}`)
+  return lines.join('\n')
+}
+
+function addRenderJobText(info: DavinciRenderJobInfo): string {
+  const lines = [
+    `queued_jobs=${info.jobCount}`,
+  ]
+  if (info.firstJobName !== undefined) lines.push(`first_job=${info.firstJobName}`)
+  return lines.join('\n')
 }
 
 /**
@@ -255,12 +291,18 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'resolve_screenshot',
     description:
-      'Capture the screen to a PNG inside the workspace and return its path; read it with the read_image tool to see the DaVinci Resolve UI, including the viewer showing the frame at the current playhead (seek first with resolve_seek). Requires a model route that accepts image input.',
-    parameters: {},
+      'Capture the DaVinci Resolve UI to a PNG and return its path; read it with the read_image tool. Requires Resolve to be the FRONTMOST app — if another window covers it the call fails and names the frontmost app; then either ask the user to bring Resolve to the front, or retry with activate: true to focus it automatically. Seek first with resolve_seek so the viewer shows the frame you need. Requires a model route that accepts image input.',
+    parameters: {
+      activate: { type: 'boolean', description: 'Bring DaVinci Resolve to the front before capturing (takes window focus)' },
+    },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
     timeoutMs: 15_000,
-    async execute() {
-      return captureScreenshot(config.screenshotDir ?? '.resolve-agent')
+    async execute(args) {
+      const fuscript = args.activate === true ? config.fuscriptPath ?? discoverFuscript() : undefined
+      if (args.activate === true && fuscript === undefined) {
+        throw new Error('activate requested but no DaVinci Resolve install found under /Applications — set fuscriptPath in config')
+      }
+      return captureScreenshot(config.screenshotDir ?? '.resolve-agent', { fuscriptForActivation: fuscript })
     },
   }))
 
@@ -324,6 +366,95 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
         reason: `delete the item starting at record frame ${args.startFrame} on video track ${args.trackIndex}`,
       })
       return resultText(await ctx.davinci.remove({ trackIndex: args.trackIndex, startFrame: args.startFrame }), mutationText)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'resolve_audio_timeline_items',
+    description:
+      'List audio items on one audio track of the current timeline, optionally windowed by record frames. Use this to locate the 套片 audio delivery on A1 and compare frame ranges against V1 picture segments. The A1 item is typically one long clip covering the whole episode.',
+    parameters: {
+      trackIndex: { type: 'number', required: true, description: '1-based audio track index (A1=1)' },
+      from: { type: 'number', description: 'Record frame lower bound (inclusive)' },
+      to: { type: 'number', description: 'Record frame upper bound (inclusive)' },
+    },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    timeoutMs: 45_000,
+    async execute(args) {
+      return resultText(await ctx.davinci.audioTimelineItems(args.trackIndex, args.from, args.to), audioTimelineItemsText)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'resolve_render_status',
+    description:
+      'Read the live render-engine state (queued-job count, is-rendering flag, current format/codec). Read-only. Use before enqueueing or starting render to confirm the current Resolve render settings — this Resolve 20.3.2.9 build has no presets and an empty GetRenderFormats, so the UI-set active settings are the only selectable surface.',
+    parameters: {},
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    timeoutMs: 30_000,
+    async execute() {
+      return resultText(await ctx.davinci.renderStatus(), renderStatusText)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'resolve_add_render_job',
+    description:
+      'Enqueue the current timeline into the render queue at `targetDir`. Preserves the current render preset/format/codec (this Resolve 20.3.2.9 build has no presets and an empty GetRenderFormats, so the UI-set active settings are the only selectable surface). Approval-gated: the approval prompt is how the user consents — do not ask in chat first.',
+    parameters: {
+      targetDir: { type: 'string', required: true, description: 'Absolute target directory the render output will land in' },
+    },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    timeoutMs: 45_000,
+    async execute(args, exec) {
+      await requireWriteApproval({
+        approval: ctx.get('approval'),
+        exec,
+        reason: `enqueue the current timeline for render into ${args.targetDir} (active render settings preserved)`,
+      })
+      return resultText(await ctx.davinci.addRenderJob({ targetDir: args.targetDir }), addRenderJobText)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'resolve_start_rendering',
+    description:
+      'Start the render engine, either the whole queue or a set of specific job ids from resolve_render_status. Approval-gated: the approval prompt is how the user consents — do not ask in chat first.',
+    parameters: {
+      jobIds: { type: 'array', items: { type: 'string' }, description: 'Job ids to start; omit to start the whole queue' },
+    },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    timeoutMs: 30_000,
+    async execute(args, exec) {
+      await requireWriteApproval({
+        approval: ctx.get('approval'),
+        exec,
+        reason: args.jobIds?.length
+          ? `start rendering jobs: ${args.jobIds.join(', ')}`
+          : 'start rendering the whole queue',
+      })
+      return resultText(await ctx.davinci.startRendering({ jobIds: args.jobIds }), mutationText)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'resolve_stop_rendering',
+    description:
+      'Stop the render engine, either the whole queue or a set of specific job ids. Approval-gated: the approval prompt is how the user consents — do not ask in chat first.',
+    parameters: {
+      jobIds: { type: 'array', items: { type: 'string' }, description: 'Job ids to stop; omit to stop the whole engine' },
+    },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    timeoutMs: 30_000,
+    async execute(args, exec) {
+      await requireWriteApproval({
+        approval: ctx.get('approval'),
+        exec,
+        reason: args.jobIds?.length
+          ? `stop rendering jobs: ${args.jobIds.join(', ')}`
+          : 'stop the render engine (whole queue)',
+      })
+      return resultText(await ctx.davinci.stopRendering({ jobIds: args.jobIds }), mutationText)
     },
   }))
 

@@ -15,6 +15,11 @@ const TOOL_NAMES = [
   'resolve_place_clip',
   'resolve_delete_item',
   'resolve_add_marker',
+  'resolve_audio_timeline_items',
+  'resolve_render_status',
+  'resolve_add_render_job',
+  'resolve_start_rendering',
+  'resolve_stop_rendering',
 ]
 
 describe('davinci-resolve composition', () => {

@@ -9,7 +9,13 @@
  */
 
 import { MAX_LISTED_ITEMS } from './protocol.ts'
-import type { DavinciDeleteRequest, DavinciMarkerRequest, DavinciPlaceRequest } from './types.ts'
+import type {
+  DavinciAddRenderJobRequest,
+  DavinciDeleteRequest,
+  DavinciMarkerRequest,
+  DavinciPlaceRequest,
+  DavinciRenderingControlRequest,
+} from './types.ts'
 
 /** Shared prelude: connect, project/timeline guards, object-safe iteration helpers. */
 export const LUA_PRELUDE = `
@@ -328,6 +334,135 @@ local item = findItemByStart(t, ${request.trackIndex}, ${request.startFrame})
 if not item then print("ERROR item-not-found: no item starts at frame " .. ${request.startFrame} .. " on video track " .. ${request.trackIndex}) return end
 local ok = t:DeleteClips({item})
 print("done=" .. tostring(ok))`
+}
+
+/**
+ * Body listing one audio track's items inside an optional record-frame window
+ * (mirror of the video-track listing; used to locate the 套片 audio delivery on A1).
+ * @param trackIndex - 1-based audio track index (A1=1).
+ * @param from - record-frame lower bound, if any.
+ * @param to - record-frame upper bound, if any.
+ * @returns Lua source appended to the prelude.
+ */
+export function audioTimelineItemsLua(trackIndex: number, from: number | undefined, to: number | undefined): string {
+  return `
+local t = currentTimeline() if not t then return end
+local from_ = ${from === undefined ? 'nil' : from}
+local to_ = ${to === undefined ? 'nil' : to}
+local items = each(t:GetItemListInTrack("audio", ${trackIndex}))
+local shown, total, n = 0, 0, 0
+for _, it in ipairs(items) do
+  total = total + 1
+  local s, e = it:GetStart(), it:GetEnd()
+  if (not from_ or e > from_) and (not to_ or s < to_) then
+    shown = shown + 1
+    if shown <= ${MAX_LISTED_ITEMS} then
+      n = n + 1
+      local tc = ""
+      local mpi = it.GetMediaPoolItem and it:GetMediaPoolItem()
+      if mpi then tc = tostring(mpi:GetClipProperty("Start TC")) end
+      print("item_" .. n .. "_name=" .. tostring(it:GetName()))
+      print("item_" .. n .. "_start=" .. tostring(s))
+      print("item_" .. n .. "_end=" .. tostring(e))
+      print("item_" .. n .. "_srctc=" .. tc)
+    end
+  end
+end
+print("total=" .. total)
+print("shown=" .. shown)`
+}
+
+/**
+ * Body reading the render-engine's live state: queued-job count, active
+ * rendering flag, and the current render format/codec names.
+ * @returns Lua source appended to the prelude.
+ */
+export function renderStatusLua(): string {
+  return `
+local jobs = p:GetRenderJobList()
+local n = jobs and #jobs or 0
+print("job_count=" .. n)
+if n > 0 and jobs then
+  local first = jobs[1]
+  if first then
+    print("first_job_name=" .. tostring(first.GetName and first:GetName()))
+  end
+end
+print("is_rendering=" .. tostring(p:IsRenderingInProgress() == true))
+local fmt = p:GetCurrentRenderFormatAndCodec()
+local fmtName = "nil"
+if fmt then fmtName = tostring(fmt[1] or fmt.Name or "nil") end
+print("cur_format=" .. fmtName)
+local codecs = each(p:GetRenderCodecs(fmtName))
+print("cur_codec_count=" .. #codecs)`
+}
+
+/**
+ * Body enqueuing the current timeline into the render queue at `targetDir`.
+ * The current render preset/format/codec are preserved; this call does not
+ * change them. Resolve 20.3.2.9 has no presets and an empty format list, so
+ * the active (UI-set) render settings are the only selectable surface.
+ * @param request - the enqueue coordinates (target dir).
+ * @returns Lua source appended to the prelude.
+ */
+export function addRenderJobLua(request: DavinciAddRenderJobRequest): string {
+  return `
+local t = currentTimeline() if not t then return end
+local settings = {
+  targetDir = ${JSON.stringify(request.targetDir)},
+}
+local job = p:AddRenderJob(settings)
+if not job then
+  print("ERROR api-failed: AddRenderJob returned nil; verify the current render preset and target dir exist")
+  return
+end
+local jobId = job:GetJobId()
+local jobs = p:GetRenderJobList()
+local n = jobs and #jobs or 0
+print("ok=true")
+print("job_id=" .. tostring(jobId))
+print("job_count=" .. n)
+print("first_job_name=" .. tostring(t:GetName()))`
+}
+
+/**
+ * Body starting the render engine (optionally scoped to a set of job ids).
+ * @param request - job ids to start, or none to start the whole queue.
+ * @returns Lua source appended to the prelude.
+ */
+export function startRenderingLua(request: DavinciRenderingControlRequest): string {
+  return `
+local jobTable = {}
+local jids = ${JSON.stringify(request.jobIds ?? [])}
+for _, j in ipairs(jids) do jobTable[#jobTable+1] = j end
+local ok
+if #jobTable > 0 then
+  ok = p:StartRendering(jobTable)
+else
+  ok = p:StartRendering()
+end
+print("done=" .. tostring(ok == true))
+print("is_rendering=" .. tostring(p:IsRenderingInProgress() == true))`
+}
+
+/**
+ * Body stopping the render engine (optionally scoped to a set of job ids).
+ * @param request - job ids to stop, or none to stop the whole queue.
+ * @returns Lua source appended to the prelude.
+ */
+export function stopRenderingLua(request: DavinciRenderingControlRequest): string {
+  return `
+local jobTable = {}
+local jids = ${JSON.stringify(request.jobIds ?? [])}
+for _, j in ipairs(jids) do jobTable[#jobTable+1] = j end
+local ok
+if #jobTable > 0 then
+  ok = p:StopRendering(jobTable)
+else
+  ok = p:StopRendering()
+end
+print("done=" .. tostring(ok == true))
+print("is_rendering=" .. tostring(p:IsRenderingInProgress() == true))`
 }
 
 /**
