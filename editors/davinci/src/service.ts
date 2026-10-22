@@ -13,11 +13,14 @@ import {
   addRenderJobLua,
   audioTimelineItemsLua,
   deleteItemLua,
+  deleteRenderJobLua,
   findByTcLua,
   findClipLua,
+  loadRenderPresetLua,
   mediaPoolLua,
   placeLua,
   projectInfoLua,
+  renderPresetsLua,
   renderStatusLua,
   seekLua,
   startRenderingLua,
@@ -28,13 +31,16 @@ import {
 import {
   addRenderJobFrom,
   audioTimelineItemsFrom,
+  deleteRenderJobFrom,
   findByTcFrom,
   findClipFrom,
+  loadRenderPresetFrom,
   mediaPoolFrom,
   mutationFrom,
   parseOutput,
   projectInfoFrom,
   renderingControlFrom,
+  renderPresetsFrom,
   renderStatusFrom,
   seekFrom,
   switchTimelineFrom,
@@ -44,9 +50,11 @@ import type {
   DavinciAddRenderJobRequest,
   DavinciAudioTimelineItemsInfo,
   DavinciCallRequest,
+  DavinciDeleteRenderJobRequest,
   DavinciDeleteRequest,
   DavinciFindClipInfo,
   DavinciFindByTcInfo,
+  DavinciLoadRenderPresetRequest,
   DavinciMarkerRequest,
   DavinciMediaPoolInfo,
   DavinciMutationInfo,
@@ -54,6 +62,7 @@ import type {
   DavinciProjectInfo,
   DavinciRenderingControlRequest,
   DavinciRenderJobInfo,
+  DavinciRenderPresetsInfo,
   DavinciRenderStatusInfo,
   DavinciResult,
   DavinciSeekInfo,
@@ -263,12 +272,33 @@ export abstract class DavinciService extends Service {
 
   /**
    * Read the live render-engine state (queued-job count, is-rendering flag,
-   * current format/codec and codec count) without touching the queue.
+   * active format/codec pair, and — when the host exposes `GetRenderPresets`
+   * and `GetRenderFormats` — the preset and format list sizes) without
+   * touching the queue.
+   *
+   * Resolve 20.x leaves `presetCount` and `formatCount` undefined (the host
+   * lacks those methods); Resolve 21.1 reports the UI-set preset list size
+   * (e.g. 40) and format list size (e.g. 23 including `mov`).
    * @param request - call envelope.
    * @returns the render-engine facts or a coded failure.
    */
   async renderStatus(request: DavinciCallRequest = {}): Promise<DavinciResult<DavinciRenderStatusInfo>> {
     return this.run(renderStatusLua(), request, (fields) => ({ ok: true, data: renderStatusFrom(fields) }))
+  }
+
+  /**
+   * Read the render-engine's active (format, codec) pair and, on Resolve 21+,
+   * its full preset list and the `LoadRenderPreset` capability flag.
+   *
+   * Resolve 20.x lacks the preset API; the result reports
+   * `presetCount` of 0, an empty `presets` array, and `hasLoadPreset` of
+   * `false`. The current (format, codec) pair is always read when the host
+   * exposes `GetCurrentRenderFormatAndCodec`.
+   * @param request - call envelope.
+   * @returns the preset list and active (format, codec) pair, or a coded failure.
+   */
+  async renderPresets(request: DavinciCallRequest = {}): Promise<DavinciResult<DavinciRenderPresetsInfo>> {
+    return this.run(renderPresetsLua(), request, (fields) => ({ ok: true, data: renderPresetsFrom(fields) }))
   }
 
   /**
@@ -302,6 +332,26 @@ export abstract class DavinciService extends Service {
    */
   async stopRendering(request: DavinciRenderingControlRequest, envelope: DavinciCallRequest = {}): Promise<DavinciResult<DavinciMutationInfo>> {
     return this.run(stopRenderingLua(request), envelope, (fields) => renderingControlFrom(fields, 'StopRendering'))
+  }
+
+  /**
+   * Load a render preset by exact name via `Project:LoadRenderPreset`.
+   * @param request - the preset name to load (must match a host-reported entry).
+   * @param envelope - call envelope.
+   * @returns the mutation outcome and the active preset name after the call.
+   */
+  async loadRenderPreset(request: DavinciLoadRenderPresetRequest, envelope: DavinciCallRequest = {}): Promise<DavinciResult<DavinciMutationInfo & { readonly loadedPreset: string }>> {
+    return this.run(loadRenderPresetLua(request), envelope, loadRenderPresetFrom)
+  }
+
+  /**
+   * Delete a queued render job by its id via `Project:DeleteRenderJob`.
+   * @param request - the job id (UUID) to delete.
+   * @param envelope - call envelope.
+   * @returns the mutation outcome plus the job id and post-delete queue depth.
+   */
+  async deleteRenderJob(request: DavinciDeleteRenderJobRequest, envelope: DavinciCallRequest = {}): Promise<DavinciResult<DavinciMutationInfo & { readonly jobId: string; readonly jobCountAfter: number }>> {
+    return this.run(deleteRenderJobLua(request), envelope, deleteRenderJobFrom)
   }
 }
 

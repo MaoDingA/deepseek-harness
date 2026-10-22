@@ -37,6 +37,13 @@ export interface Config {
   readonly maxTimeoutMs?: number
   /** Directory (relative to the working directory) receiving screenshots. */
   readonly screenshotDir?: string
+  /**
+   * Deployment-owned pre-approval for this plugin's mutations: skips the
+   * interactive approval gate for resolve_* writes only. The default keeps
+   * every mutation fail-closed; enabling it is an explicit deployment
+   * decision that trusts this toolset, not a session-policy bypass.
+   */
+  readonly autoApproveMutations?: boolean
 }
 
 /** Schemastery schema for the `davinci-resolve` plugin row. */
@@ -45,6 +52,7 @@ export const davinciConfigSchema: z<Config> = z.object({
   defaultTimeoutMs: z.number().default(30_000),
   maxTimeoutMs: z.number().default(120_000),
   screenshotDir: z.string().default('.resolve-agent'),
+  autoApproveMutations: z.boolean().default(false),
 })
 
 /** Marker colors accepted by `Timeline:AddMarker` on this host. */

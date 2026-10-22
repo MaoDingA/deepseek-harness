@@ -15,6 +15,11 @@ describe('requireWriteApproval', () => {
       .rejects.toThrow(/no approval channel is available/)
   })
 
+  it('skips the gate without an approver when the deployment pre-approved mutations', async () => {
+    await expect(requireWriteApproval({ approval: undefined, exec, reason: 'r', preApproved: true }))
+      .resolves.toBeUndefined()
+  })
+
   it('fails closed for an agent-less execution', async () => {
     const { approver } = approverReturning('allowed-once')
     await expect(requireWriteApproval({ approval: approver, exec: { name: 'resolve_delete_item', callId: 'call-2', signal }, reason: 'r' }))

@@ -19,6 +19,7 @@ import type {
   DavinciMutationInfo,
   DavinciProjectInfo,
   DavinciRenderJobInfo,
+  DavinciRenderPresetsInfo,
   DavinciRenderStatusInfo,
   DavinciResult,
   DavinciSeekInfo,
@@ -42,6 +43,8 @@ const FAILURE_CODES: readonly DavinciFailureCode[] = [
   'bin-not-found',
   'clip-not-found',
   'item-not-found',
+  'job-not-found',
+  'preset-not-found',
   'bad-tc',
   'api-failed',
   'spawn-failed',
@@ -213,9 +216,13 @@ export function audioTimelineItemsFrom(fields: ReadonlyMap<string, string>): Dav
 }
 
 /**
- * Project render-status fields: the live render-engine state, not a queued-job list.
+ * Project render-status fields: the live render-engine state. On Resolve 21+
+ * the body also reports `preset_count` and `format_count`; on Resolve 20.x
+ * those keys are absent (or zero) and the corresponding fields stay undefined.
  * @param fields - parsed kv fields from the render-status body.
- * @returns job count and the active rendering flag.
+ * @returns job count, the active rendering flag, the active (format, codec)
+ *   pair, the format's codec list size, and — when the host exposes them —
+ *   the preset and format list sizes.
  */
 export function renderStatusFrom(fields: ReadonlyMap<string, string>): DavinciRenderStatusInfo {
   return {
@@ -224,6 +231,36 @@ export function renderStatusFrom(fields: ReadonlyMap<string, string>): DavinciRe
     currentFormat: text(fields, 'cur_format'),
     currentCodec: text(fields, 'cur_codec'),
     codecCount: numeric(fields, 'cur_codec_count'),
+    presetCount: numeric(fields, 'preset_count'),
+    formatCount: numeric(fields, 'format_count'),
+  }
+}
+
+/**
+ * Project render-preset fields: the active (format, codec) pair plus the
+ * host's preset list (Resolve 21+ surface).
+ *
+ * `presets` is filled from `preset_<i>=<name>` rows (1-based `i`) in
+ * host-reported order; an absent or zero `preset_count` means the host lacks
+ * the API (Resolve 20.x) and the array stays empty.
+ * @param fields - parsed kv fields from the render-presets body.
+ * @returns the typed preset list with the active (format, codec) pair.
+ */
+export function renderPresetsFrom(fields: ReadonlyMap<string, string>): DavinciRenderPresetsInfo {
+  const currentFormat = text(fields, 'current_format') ?? ''
+  const currentCodec = text(fields, 'current_codec') ?? ''
+  const presetCount = numeric(fields, 'preset_count') ?? 0
+  const presets: string[] = []
+  for (let i = 1; i <= presetCount; i += 1) {
+    const name = fields.get(`preset_${i}`)
+    if (name !== undefined) presets.push(name)
+  }
+  return {
+    currentFormat,
+    currentCodec,
+    presetCount,
+    presets,
+    hasLoadPreset: fields.get('has_load_preset') === 'true',
   }
 }
 
@@ -242,6 +279,42 @@ export function addRenderJobFrom(fields: ReadonlyMap<string, string>): DavinciRe
     data: {
       jobCount: numeric(fields, 'job_count') ?? 1,
       firstJobName: text(fields, 'first_job_name'),
+      jobId: text(fields, 'job_id'),
+    },
+  }
+}
+
+/**
+ * Project load-render-preset fields: the success flag and the read-back
+ * preset name.
+ * @param fields - parsed kv fields from the load-render-preset body.
+ * @returns the mutation outcome and the active preset name after the call.
+ */
+export function loadRenderPresetFrom(fields: ReadonlyMap<string, string>): DavinciResult<DavinciMutationInfo & { readonly loadedPreset: string }> {
+  const done = fields.get('done') === 'true'
+  if (!done) {
+    return { ok: false, code: 'api-failed', message: 'Resolve did not confirm the preset load' }
+  }
+  return { ok: true, data: { done, loadedPreset: text(fields, 'loaded_preset') ?? '' } }
+}
+
+/**
+ * Project delete-render-job fields: the success flag, the deleted job id, and
+ * the post-delete queue depth.
+ * @param fields - parsed kv fields from the delete-render-job body.
+ * @returns the mutation outcome plus the job id and queue depth.
+ */
+export function deleteRenderJobFrom(fields: ReadonlyMap<string, string>): DavinciResult<DavinciMutationInfo & { readonly jobId: string; readonly jobCountAfter: number }> {
+  const done = fields.get('done') === 'true'
+  if (!done) {
+    return { ok: false, code: 'api-failed', message: 'Resolve did not confirm the job deletion' }
+  }
+  return {
+    ok: true,
+    data: {
+      done,
+      jobId: text(fields, 'job_id') ?? '',
+      jobCountAfter: numeric(fields, 'job_count_after') ?? 0,
     },
   }
 }

@@ -3,8 +3,10 @@ import {
   addRenderJobFrom,
   audioTimelineItemsFrom,
   clampTimeout,
+  deleteRenderJobFrom,
   findByTcFrom,
   findClipFrom,
+  loadRenderPresetFrom,
   mediaPoolFrom,
   mutationFrom,
   parseOutput,
@@ -265,12 +267,32 @@ describe('projections', () => {
     })
   })
 
-  it('addRenderJobFrom maps a Resolve refusal to an api-failed result', () => {
+  it('addRenderJobFrom maps the enqueue outcome, including the job id', () => {
     expect(addRenderJobFrom(fieldsOf([['ok', 'true'], ['job_id', 'job-1'], ['job_count', '1'], ['first_job_name', 'EP04_20260129']]))).toEqual({
       ok: true,
-      data: { jobCount: 1, firstJobName: 'EP04_20260129' },
+      data: { jobCount: 1, firstJobName: 'EP04_20260129', jobId: 'job-1' },
+    })
+    expect(addRenderJobFrom(fieldsOf([['ok', 'true'], ['job_count', '1']]))).toEqual({
+      ok: true,
+      data: { jobCount: 1, firstJobName: undefined, jobId: undefined },
     })
     expect(addRenderJobFrom(fieldsOf([['ok', 'false']]))).toMatchObject({ ok: false, code: 'api-failed' })
+  })
+
+  it('loadRenderPresetFrom reads the active preset and refuses on failure', () => {
+    expect(loadRenderPresetFrom(fieldsOf([['done', 'true'], ['loaded_preset', 'H.264']]))).toEqual({
+      ok: true,
+      data: { done: true, loadedPreset: 'H.264' },
+    })
+    expect(loadRenderPresetFrom(fieldsOf([['done', 'false']]))).toMatchObject({ ok: false, code: 'api-failed' })
+  })
+
+  it('deleteRenderJobFrom reads the queue depth after deletion and refuses on failure', () => {
+    expect(deleteRenderJobFrom(fieldsOf([['done', 'true'], ['job_id', 'job-1'], ['job_count_after', '0']]))).toEqual({
+      ok: true,
+      data: { done: true, jobId: 'job-1', jobCountAfter: 0 },
+    })
+    expect(deleteRenderJobFrom(fieldsOf([['done', 'false']]))).toMatchObject({ ok: false, code: 'api-failed' })
   })
 
   it('renderingControlFrom reads the control outcome for both start and stop', () => {

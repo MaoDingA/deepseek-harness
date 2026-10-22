@@ -9,6 +9,7 @@ const TOOL_NAMES = [
   'resolve_media_pool',
   'resolve_timeline_items',
   'resolve_find_by_tc',
+  'resolve_find_clip',
   'resolve_seek',
   'resolve_screenshot',
   'resolve_switch_timeline',
@@ -17,7 +18,10 @@ const TOOL_NAMES = [
   'resolve_add_marker',
   'resolve_audio_timeline_items',
   'resolve_render_status',
+  'resolve_render_presets',
   'resolve_add_render_job',
+  'resolve_load_render_preset',
+  'resolve_delete_render_job',
   'resolve_start_rendering',
   'resolve_stop_rendering',
 ]

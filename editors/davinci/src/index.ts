@@ -16,7 +16,7 @@ import { registerDavinciTools } from './tools.ts'
 export { captureScreenshot, DAVINCI_MARKER_COLORS, davinciConfigSchema, discoverFuscript, FuscriptDavinci } from './provider.ts'
 export { DavinciService, classifySpawnError, errorMessage } from './service.ts'
 export { requireWriteApproval } from './tools.ts'
-export type { DavinciCallRequest, DavinciSpec, DavinciFailureCode, DavinciResult } from './types.ts'
+export type { DavinciCallRequest, DavinciRenderPresetsInfo, DavinciRenderStatusInfo, DavinciSpec, DavinciFailureCode, DavinciResult } from './types.ts'
 
 /** Plugin id used in composition rows. */
 export const name = 'davinci-resolve'

@@ -37,6 +37,8 @@ export type DavinciFailureCode =
   | 'bin-not-found'
   | 'clip-not-found'
   | 'item-not-found'
+  | 'job-not-found'
+  | 'preset-not-found'
   | 'bad-tc'
   | 'api-failed'
   | 'spawn-failed'
@@ -178,9 +180,15 @@ export interface DavinciAudioTimelineItemsInfo {
 }
 
 /**
- * Render-engine facts: the queued-job count, the live render flag, and the
- * active format/codec surface. The codec count reflects the active format's
- * available codecs (empty on the 20.3.2.9 build probed in this project).
+ * Render-engine facts: the queued-job count, the live render flag, the active
+ * format/codec pair, and the host's preset/format surface.
+ *
+ * Resolve 20.x (e.g. 20.3.2.9) reports zero for `presetCount` and zero for
+ * `formatCount` and leaves `currentFormat`/`currentCodec` undefined; the
+ * live render settings are the only selectable surface. Resolve 21.1
+ * reports the UI-set preset list (e.g. 40 entries) and format list (e.g.
+ * 23 entries including `mov`); see `davinci-resolve-21` skill and the
+ * project's 21.1.10 live probe for the exact surface.
  */
 export interface DavinciRenderStatusInfo {
   readonly jobCount: number
@@ -188,12 +196,44 @@ export interface DavinciRenderStatusInfo {
   readonly currentFormat: string | undefined
   readonly currentCodec: string | undefined
   readonly codecCount: number | undefined
+  /** Number of render presets the host exposes; 0 on Resolve 20.x. */
+  readonly presetCount: number | undefined
+  /** Number of render formats the host exposes; 0 on Resolve 20.x. */
+  readonly formatCount: number | undefined
 }
 
-/** Queued render job, as read from Resolve after enqueue (may be empty list if Resolve reports no rows yet). */
+/**
+ * Live render preset list (Resolve 21+ surface). Resolve 20.x reports
+ * `presetCount` of 0 and an empty `presets` array; the current (format,
+ * codec) pair is still reported when the host exposes the query.
+ */
+export interface DavinciRenderPresetsInfo {
+  /** Currently selected render format, or '' when the host lacks the query. */
+  readonly currentFormat: string
+  /** Currently selected codec, or '' when the host lacks the query. */
+  readonly currentCodec: string
+  /** Number of presets in the list (0 on Resolve 20.x). */
+  readonly presetCount: number
+  /** Preset names in host-reported order; empty when the host lacks the API. */
+  readonly presets: readonly string[]
+  /** Whether `Project:LoadRenderPreset` is callable (Resolve 21+ surface). */
+  readonly hasLoadPreset: boolean
+}
+
+/**
+ * Queued render job, as read from Resolve after enqueue.
+ *
+ * Resolve 21.1 reports the new job's id in `jobId` (a UUID string read from
+ * the `JobId` table field of the newest `GetRenderJobList()` row) and its
+ * queue name in `firstJobName`. On 20.x both are reported as-is — `jobId`
+ * is the `JobId` field of the newest row when the host exposes the table
+ * shape, otherwise `firstJobName`. `jobCount` is the post-enqueue queue
+ * depth.
+ */
 export interface DavinciRenderJobInfo {
   readonly jobCount: number
   readonly firstJobName: string | undefined
+  readonly jobId: string | undefined
 }
 
 /** Add-render-job request: enqueue the current timeline into the render queue. */
@@ -204,6 +244,28 @@ export interface DavinciAddRenderJobRequest {
 /** Request to start or stop background rendering. */
 export interface DavinciRenderingControlRequest {
   readonly jobIds: readonly string[] | undefined
+}
+
+/**
+ * Load-render-preset request: select a render preset by exact name.
+ *
+ * The name must match one of the entries `resolve_render_presets` reported
+ * for the running Resolve build. Resolve 20.x builds lack the API and the
+ * call returns `api-failed` with a `preset-not-found` refusal.
+ */
+export interface DavinciLoadRenderPresetRequest {
+  readonly presetName: string
+}
+
+/**
+ * Delete-render-job request: remove a single queued render job by its id.
+ *
+ * The id must match the `JobId` of a row in `p:GetRenderJobList()`. The
+ * host's `DeleteRenderJob` returns false for an unknown id, which is
+ * reported as `api-failed`.
+ */
+export interface DavinciDeleteRenderJobRequest {
+  readonly jobId: string
 }
 
 /**
