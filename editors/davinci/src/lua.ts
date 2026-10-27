@@ -554,16 +554,38 @@ if n <= before and (job == nil or job == false) then
   print("ERROR api-failed: AddRenderJob returned falsy and the queue did not grow; verify the current render preset and target dir exist")
   return
 end
+local function rowId(row)
+  if type(row) == "table" then return row.JobId end
+  if type(row) == "userdata" and row.GetJobId then return row:GetJobId() end
+  return nil
+end
+local function rowName(row)
+  if type(row) == "table" then return row.RenderJobName or row.Name end
+  if type(row) == "userdata" and row.GetName then return row:GetName() end
+  return nil
+end
+-- The added job is the one whose id was absent from the pre-call snapshot;
+-- trusting list order (first row) would report a pre-existing job's id.
+local preIds = {}
+if pre then
+  for _, row in ipairs(pre) do
+    local pid = rowId(row)
+    if pid then preIds[tostring(pid)] = true end
+  end
+end
 local jobId = job
 if type(job) == "table" and job.JobId then jobId = job.JobId end
 if type(job) == "userdata" and job.GetJobId then jobId = job:GetJobId() end
 local firstJobName = tostring(t:GetName())
-if jobs and n > 0 then
-  local row = jobs[1]
-  local nm = type(row) == "table" and (row.RenderJobName or row.Name) or (type(row) == "userdata" and row.GetName and row:GetName())
-  if nm then firstJobName = tostring(nm) end
-  local rid = type(row) == "table" and row.JobId or (type(row) == "userdata" and row.GetJobId and row:GetJobId())
-  if rid then jobId = rid end
+if jobs then
+  for _, row in ipairs(jobs) do
+    local rid = rowId(row)
+    if rid and not preIds[tostring(rid)] then
+      jobId = rid
+      local nm = rowName(row)
+      if nm then firstJobName = tostring(nm) end
+    end
+  end
 end
 print("ok=true")
 print("job_id=" .. tostring(jobId))
@@ -652,6 +674,17 @@ print("job_count_after=" .. m)`
 }
 
 /**
+ * Render a readonly string list as a Lua table literal (`{ "a", "b" }`);
+ * JSON string quoting is valid Lua, while JSON array syntax (`[...]`) is not.
+ * @param values - the strings to embed.
+ * @returns the Lua table literal source.
+ */
+function luaStringList(values: readonly string[]): string {
+  if (values.length === 0) return '{}'
+  return '{ ' + values.map((value) => JSON.stringify(value)).join(', ') + ' }'
+}
+
+/**
  * Body starting the render engine (optionally scoped to a set of job ids).
  * @param request - job ids to start, or none to start the whole queue.
  * @returns Lua source appended to the prelude.
@@ -659,7 +692,7 @@ print("job_count_after=" .. m)`
 export function startRenderingLua(request: DavinciRenderingControlRequest): string {
   return `
 local jobTable = {}
-local jids = ${JSON.stringify(request.jobIds ?? [])}
+local jids = ${luaStringList(request.jobIds ?? [])}
 for _, j in ipairs(jids) do jobTable[#jobTable+1] = j end
 local ok
 if #jobTable > 0 then
@@ -679,7 +712,7 @@ print("is_rendering=" .. tostring(p:IsRenderingInProgress() == true))`
 export function stopRenderingLua(request: DavinciRenderingControlRequest): string {
   return `
 local jobTable = {}
-local jids = ${JSON.stringify(request.jobIds ?? [])}
+local jids = ${luaStringList(request.jobIds ?? [])}
 for _, j in ipairs(jids) do jobTable[#jobTable+1] = j end
 local ok
 if #jobTable > 0 then
