@@ -283,7 +283,7 @@ export abstract class DavinciService extends Service {
    * @returns the render-engine facts or a coded failure.
    */
   async renderStatus(request: DavinciCallRequest = {}): Promise<DavinciResult<DavinciRenderStatusInfo>> {
-    return this.run(renderStatusLua(), request, (fields) => ({ ok: true, data: renderStatusFrom(fields) }))
+    return this.run(renderStatusLua(), request, renderStatusFrom)
   }
 
   /**

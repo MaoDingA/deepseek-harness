@@ -252,19 +252,35 @@ describe('projections', () => {
       ['cur_format', 'MP4'],
       ['cur_codec_count', '3'],
     ]))).toEqual({
-      jobCount: 2,
-      isRendering: false,
-      currentFormat: 'MP4',
-      currentCodec: undefined,
-      codecCount: 3,
+      ok: true,
+      data: {
+        jobCount: 2,
+        isRendering: false,
+        currentFormat: 'MP4',
+        currentCodec: undefined,
+        codecCount: 3,
+      },
     })
     expect(renderStatusFrom(fieldsOf([['job_count', '0'], ['is_rendering', 'true']]))).toEqual({
-      jobCount: 0,
-      isRendering: true,
-      currentFormat: undefined,
-      currentCodec: undefined,
-      codecCount: undefined,
+      ok: true,
+      data: {
+        jobCount: 0,
+        isRendering: true,
+        currentFormat: undefined,
+        currentCodec: undefined,
+        codecCount: undefined,
+      },
     })
+  })
+
+  it('renderStatusFrom fails loud on read-failed markers instead of reporting an empty queue', () => {
+    const failed = renderStatusFrom(fieldsOf([['job_count', 'read-failed'], ['is_rendering', 'read-failed']]))
+    expect(failed.ok).toBe(false)
+    if (!failed.ok) {
+      expect(failed.code).toBe('api-failed')
+      expect(failed.message).toContain('job_count')
+      expect(failed.message).toContain('is_rendering')
+    }
   })
 
   it('addRenderJobFrom maps the enqueue outcome, including the job id', () => {

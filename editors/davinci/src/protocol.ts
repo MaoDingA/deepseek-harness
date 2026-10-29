@@ -219,20 +219,38 @@ export function audioTimelineItemsFrom(fields: ReadonlyMap<string, string>): Dav
  * Project render-status fields: the live render-engine state. On Resolve 21+
  * the body also reports `preset_count` and `format_count`; on Resolve 20.x
  * those keys are absent (or zero) and the corresponding fields stay undefined.
+ * A `read-failed` marker on any render-engine field (the Lua body emits one
+ * when its pcall-protected host call errored) fails the whole projection: a
+ * failed read must not masquerade as an empty queue or `is_rendering=false`.
  * @param fields - parsed kv fields from the render-status body.
- * @returns job count, the active rendering flag, the active (format, codec)
- *   pair, the format's codec list size, and — when the host exposes them —
- *   the preset and format list sizes.
+ * @returns a failure result when any render-engine read failed; otherwise the
+ *   job count, the active rendering flag, the active (format, codec) pair, the
+ *   format's codec list size, and — when the host exposes them — the preset
+ *   and format list sizes.
  */
-export function renderStatusFrom(fields: ReadonlyMap<string, string>): DavinciRenderStatusInfo {
+export function renderStatusFrom(fields: ReadonlyMap<string, string>): DavinciResult<DavinciRenderStatusInfo> {
+  const failedReads = ['job_count', 'is_rendering', 'cur_format', 'cur_codec_count']
+    .filter((key) => fields.get(key) === 'read-failed')
+  if (failedReads.length > 0) {
+    return {
+      ok: false,
+      code: 'api-failed',
+      message: `render-status read failed (${failedReads.join(', ')}): the fuscript bridge could not `
+        + 'read the render engine — the Resolve script listener may be wedged (a Resolve restart '
+        + 'restores it). Refusing to report queue state from a failed read.',
+    }
+  }
   return {
-    jobCount: numeric(fields, 'job_count') ?? 0,
-    isRendering: fields.get('is_rendering') === 'true',
-    currentFormat: text(fields, 'cur_format'),
-    currentCodec: text(fields, 'cur_codec'),
-    codecCount: numeric(fields, 'cur_codec_count'),
-    presetCount: numeric(fields, 'preset_count'),
-    formatCount: numeric(fields, 'format_count'),
+    ok: true,
+    data: {
+      jobCount: numeric(fields, 'job_count') ?? 0,
+      isRendering: fields.get('is_rendering') === 'true',
+      currentFormat: text(fields, 'cur_format'),
+      currentCodec: text(fields, 'cur_codec'),
+      codecCount: numeric(fields, 'cur_codec_count'),
+      presetCount: numeric(fields, 'preset_count'),
+      formatCount: numeric(fields, 'format_count'),
+    },
   }
 }
 

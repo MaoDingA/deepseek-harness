@@ -449,28 +449,40 @@ print("shown=" .. shown)`
 export function renderStatusLua(): string {
   return `
 local okJobs, jobs = pcall(function() return p:GetRenderJobList() end)
-local n = okJobs and jobs and #jobs or 0
-print("job_count=" .. n)
-if n > 0 and jobs and jobs[1] then
-  local first = jobs[1]
-  if type(first) == "table" and first.RenderJobName then
-    print("first_job_name=" .. tostring(first.RenderJobName))
-  elseif type(first) == "userdata" and first.GetName then
-    local okName, nm = pcall(function() return first:GetName() end)
-    if okName and nm then print("first_job_name=" .. tostring(nm)) end
+if not okJobs or jobs == nil then
+  print("job_count=read-failed")
+else
+  local n = #jobs
+  print("job_count=" .. n)
+  if n > 0 and jobs[1] then
+    local first = jobs[1]
+    if type(first) == "table" and first.RenderJobName then
+      print("first_job_name=" .. tostring(first.RenderJobName))
+    elseif type(first) == "userdata" and first.GetName then
+      local okName, nm = pcall(function() return first:GetName() end)
+      if okName and nm then print("first_job_name=" .. tostring(nm)) end
+    end
   end
 end
 local okRender, rendering = pcall(function() return p:IsRenderingInProgress() end)
-print("is_rendering=" .. tostring(okRender and rendering == true))
-local okFmt, fmt = pcall(function() return p:GetCurrentRenderFormatAndCodec() end)
-local fmtName = "nil"
-if okFmt and fmt then
-  local nm = fmt[1] or fmt.Name
-  if nm then fmtName = tostring(nm) end
+if okRender then
+  print("is_rendering=" .. tostring(rendering == true))
+else
+  print("is_rendering=read-failed")
 end
-print("cur_format=" .. fmtName)
-local okCodecs, codecs = pcall(function() return each(p:GetRenderCodecs(fmtName)) end)
-print("cur_codec_count=" .. tostring(okCodecs and codecs and #codecs or 0))`
+local okFmt, fmt = pcall(function() return p:GetCurrentRenderFormatAndCodec() end)
+if okFmt then
+  local nm = fmt and (fmt[1] or fmt.Name)
+  print("cur_format=" .. tostring(nm))
+else
+  print("cur_format=read-failed")
+end
+local okCodecs, codecs = pcall(function() return each(p:GetRenderCodecs(fmt and (fmt[1] or fmt.Name) or nil)) end)
+if okCodecs and codecs then
+  print("cur_codec_count=" .. #codecs)
+else
+  print("cur_codec_count=read-failed")
+end`
 }
 
 /**
