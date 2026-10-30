@@ -47,3 +47,13 @@ worktrees/
 .agents/worktrees/
 .typert-*/
 native/system/test/bin/
+# Local working output: security-scanner artifacts, agent session evidence,
+# per-machine scratch (retake guards, teacher-channel reports). Never tracked;
+# repository reference gates skip ignored paths by design.
+.mimosa/
+.resolve-agent/
+.zcode/
+scratch-davinci/
+scratch-local-test/
+scratch-retake/
+tmp-teacher-fix/
