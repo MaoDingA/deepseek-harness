@@ -39,6 +39,11 @@ describe('parseOutput', () => {
     expect(parsed.message).toBe('boom')
   })
 
+  it('keeps the ambiguous-job refusal code the empty-return defense emits', () => {
+    const parsed = parseOutput('ERROR ambiguous-job: 2 new jobs appeared while AddRenderJob returned no id')
+    expect(parsed).toMatchObject({ status: 'error', code: 'ambiguous-job' })
+  })
+
   it('keeps a colon-less ERROR message whole', () => {
     const parsed = parseOutput('ERROR boom')
     expect(parsed).toMatchObject({ status: 'error', code: 'api-failed', message: 'boom' })
@@ -266,14 +271,18 @@ describe('projections', () => {
     }
   })
 
-  it('addRenderJobFrom maps the enqueue outcome, including the job id', () => {
-    expect(addRenderJobFrom(fieldsOf([['ok', 'true'], ['job_id', 'job-1'], ['job_count', '1'], ['first_job_name', 'EP04_20260129']]))).toEqual({
+  it('addRenderJobFrom maps the enqueue outcome, including the job id and its source', () => {
+    expect(addRenderJobFrom(fieldsOf([['ok', 'true'], ['job_id', 'job-1'], ['id_source', 'returned'], ['job_count', '1'], ['first_job_name', 'EP04_20260129']]))).toEqual({
       ok: true,
-      data: { jobCount: 1, firstJobName: 'EP04_20260129', jobId: 'job-1' },
+      data: { jobCount: 1, firstJobName: 'EP04_20260129', jobId: 'job-1', idSource: 'returned' },
+    })
+    expect(addRenderJobFrom(fieldsOf([['ok', 'true'], ['job_id', 'job-new'], ['id_source', 'read-back'], ['job_count', '2']]))).toEqual({
+      ok: true,
+      data: { jobCount: 2, firstJobName: undefined, jobId: 'job-new', idSource: 'read-back' },
     })
     expect(addRenderJobFrom(fieldsOf([['ok', 'true'], ['job_count', '1']]))).toEqual({
       ok: true,
-      data: { jobCount: 1, firstJobName: undefined, jobId: undefined },
+      data: { jobCount: 1, firstJobName: undefined, jobId: undefined, idSource: 'returned' },
     })
     expect(addRenderJobFrom(fieldsOf([['ok', 'false']]))).toMatchObject({ ok: false, code: 'api-failed' })
   })

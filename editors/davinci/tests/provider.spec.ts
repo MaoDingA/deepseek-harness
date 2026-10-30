@@ -124,6 +124,12 @@ rl.on('line', (line) => {
     inner = { error: 'Script timed out after 2s. Avoid long iterations; fetch only what you need.' }
   } else if (mode === 'traceback') {
     inner = { error: "Traceback (most recent call last):\\n  File \\"<script>\\", line 1, in <module>\\n    import os\\n  File \\"<string>\\", line 49, in _sandbox_hook\\n    raise PermissionError(f'import not allowed: {args[0]}')\\nPermissionError: import not allowed: os\\n" }
+  } else if (mode === 'render-add') {
+    inner = { output: 'ok=true\\njob_id=job-new\\nid_source=read-back\\njob_count=2\\nfirst_job_name=New\\n' }
+  } else if (mode === 'render-ambiguous') {
+    inner = { output: 'ERROR ambiguous-job: 2 new jobs appeared while AddRenderJob returned no id; candidates: job-n1, job-n2. No id is reported, nothing further is enqueued, and nothing is deleted - read resolve_render_status and disambiguate.\\n' }
+  } else if (mode === 'render-delete') {
+    inner = { output: 'done=true\\njob_id=job-a\\njob_count_after=1\\n' }
   } else {
     inner = { output: 'resolve_version=21.1.1.10\\nproject_name=probe\\ntimeline_count=1\\ntimeline_1=Main\\ncurrent_timeline=Main\\ncurrent_start=0\\ncurrent_end=2500\\nvideo_tracks=1\\naudio_tracks=2\\n' }
   }
@@ -191,6 +197,28 @@ describe('McpDavinci stdio exchange', () => {
       code: 'api-failed',
       message: 'PermissionError: import not allowed: os',
     })
+  })
+
+  it('runs the add-render-job read-back confirmation through the real stdio transport', async () => {
+    process.env.FAKE_MODE = 'render-add'
+    const result = await serviceWithFakeServer().addRenderJob({ targetDir: '/tmp/dsh-render-test' })
+    expect(result).toEqual({
+      ok: true,
+      data: { jobCount: 2, firstJobName: 'New', jobId: 'job-new', idSource: 'read-back' },
+    })
+  })
+
+  it('maps the ambiguous-job refusal through the real stdio transport', async () => {
+    process.env.FAKE_MODE = 'render-ambiguous'
+    const result = await serviceWithFakeServer().addRenderJob({ targetDir: '/tmp/dsh-render-test' })
+    expect(result).toMatchObject({ ok: false, code: 'ambiguous-job' })
+    if (!result.ok) expect(result.message).toContain('job-n1, job-n2')
+  })
+
+  it('runs the delete-render-job read-back confirmation through the real stdio transport', async () => {
+    process.env.FAKE_MODE = 'render-delete'
+    const result = await serviceWithFakeServer().deleteRenderJob({ jobId: 'job-a' })
+    expect(result).toEqual({ ok: true, data: { done: true, jobId: 'job-a', jobCountAfter: 1 } })
   })
 
   it('maps a JSON-RPC error reply (binary init failure) to spawn-failed', async () => {

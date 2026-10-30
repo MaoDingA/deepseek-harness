@@ -26,6 +26,7 @@ import {
   switchTimelinePython,
   timelineItemsPython,
 } from '../src/python.ts'
+import { addRenderJobFrom, deleteRenderJobFrom, parseOutput } from '../src/protocol.ts'
 
 describe('prelude value discipline', () => {
   it('locks the Lua-tostring parity the kv parser reads (nil/true/false literals, %.14g floats)', () => {
@@ -85,12 +86,27 @@ describe('render control Python body generation', () => {
     }
   })
 
-  it('resolves the added job id by queue delta, not by list order', () => {
+  it('snapshots the queue id set before the call and resolves the new id by set difference', () => {
     const body = addRenderJobPython({ targetDir: '/tmp/dsh-render-test' })
-    expect(body).toContain('pre_ids')
-    expect(body).toContain('s(rid) not in pre_ids')
+    expect(body.indexOf('pre_ids = queue_ids()')).toBeLessThan(body.indexOf('project.AddRenderJob(settings)'))
+    expect(body).toContain('if i not in baseline and i not in fresh')
     // The stale first-row overwrite this replaced indexed row 0 unconditionally.
     expect(body).not.toContain('jobs[0]')
+  })
+
+  it('bounds the enqueue to one sanctioned retry and refuses ambiguous deltas', () => {
+    const body = addRenderJobPython({ targetDir: '/tmp/dsh-render-test' })
+    expect(body).toContain('while attempts < 2:')
+    expect(body).toContain('ERROR ambiguous-job:')
+  })
+
+  it('targets only the passed id and keeps the delete path free of any clear-queue fallback', () => {
+    const body = deleteRenderJobPython({ jobId: '4f7b2c31-9c2a-4b1e-8b0d-1f2a3c4d5e6f' })
+    expect(body).toContain('project.DeleteRenderJob(job_id)')
+    expect(body).not.toContain('DeleteAllRenderJobs')
+    // done=true prints only after the read-back confirmed the id left the queue.
+    expect(body.indexOf('still_queued')).toBeGreaterThan(0)
+    expect(body.indexOf("if still_queued:")).toBeLessThan(body.indexOf("print('done=true')"))
   })
 })
 
@@ -140,6 +156,89 @@ const python3Available = (() => {
   }
 })()
 
+/**
+ * Driver that executes one generated body against a fake `project`/`resolve`
+ * pair: queue snapshots are consumed one per `GetRenderJobList` call (a
+ * `null` entry means the host returned None, i.e. a failed read), add/delete
+ * returns repeat their last scripted value, and every host mutation is
+ * recorded so tests can prove what the body actually did.
+ */
+const FAKE_PROJECT_DRIVER = `
+import io
+import json
+import runpy
+import sys
+
+scenario = json.load(open(sys.argv[2], encoding='utf-8'))
+
+
+class FakeTimeline:
+    def __init__(self, name):
+        self._name = name
+
+    def GetName(self):
+        return self._name
+
+
+class FakeProject:
+    def __init__(self, scenario):
+        self.snapshots = list(scenario.get('queue_snapshots') or [])
+        self.last_queue = []
+        self.add_returns = list(scenario.get('add_returns') or [])
+        self.add_raises = bool(scenario.get('add_raises'))
+        self.add_calls = []
+        self.delete_returns = list(scenario.get('delete_returns') or [])
+        self.delete_raises = bool(scenario.get('delete_raises'))
+        self.delete_calls = []
+        self.timeline = FakeTimeline(scenario.get('timeline_name') or 'EP04_20260129')
+
+    def GetMediaPool(self):
+        return None
+
+    def GetCurrentTimeline(self):
+        return self.timeline
+
+    def GetRenderJobList(self):
+        if self.snapshots:
+            self.last_queue = self.snapshots.pop(0)
+        if self.last_queue is None:
+            return None
+        return [dict(row) for row in self.last_queue]
+
+    def AddRenderJob(self, settings):
+        self.add_calls.append(dict(settings))
+        if self.add_raises:
+            raise RuntimeError('AddRenderJob exploded')
+        if self.add_returns:
+            value = self.add_returns.pop(0)
+            self.add_returns.append(value)
+            return value
+        return ''
+
+    def DeleteRenderJob(self, job_id):
+        self.delete_calls.append(job_id)
+        if self.delete_raises:
+            raise RuntimeError('DeleteRenderJob exploded')
+        if self.delete_returns:
+            value = self.delete_returns.pop(0)
+            self.delete_returns.append(value)
+            return value
+        return True
+
+
+project = FakeProject(scenario)
+namespace = {'resolve': 'fake-resolve', 'project': project}
+buffer = io.StringIO()
+real_stdout = sys.stdout
+sys.stdout = buffer
+try:
+    runpy.run_path(sys.argv[1], init_globals=namespace, run_name='dsh_davinci_body')
+finally:
+    sys.stdout = real_stdout
+print(buffer.getvalue(), end='')
+print('CALLS ' + json.dumps({'add_calls': project.add_calls, 'delete_calls': project.delete_calls}))
+`
+
 describe('generated Python compiles', () => {
   // Syntax-only (ast.parse, no execution): every body must be valid Python on
   // any machine that has a python3; skipped where python3 is absent.
@@ -181,5 +280,222 @@ describe('generated Python compiles', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+/** One executed-body outcome: the captured kv output plus the recorded host mutations. */
+interface FakeProjectRun {
+  readonly output: string
+  readonly addCalls: { readonly targetDir: string }[]
+  readonly deleteCalls: string[]
+}
+
+function runBodyWithFakeProject(body: string, scenario: Record<string, unknown>): FakeProjectRun {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-davinci-behave-'))
+  try {
+    const bodyFile = join(dir, 'body.py')
+    writeFileSync(bodyFile, pythonScriptOf(body), 'utf8')
+    const scenarioFile = join(dir, 'scenario.json')
+    writeFileSync(scenarioFile, JSON.stringify(scenario), 'utf8')
+    const driverFile = join(dir, 'driver.py')
+    writeFileSync(driverFile, FAKE_PROJECT_DRIVER, 'utf8')
+    const stdout = execFileSync('python3', [driverFile, bodyFile, scenarioFile], { encoding: 'utf8' })
+    const lines = stdout.split('\n')
+    const callsIndex = lines.findIndex((line) => line.startsWith('CALLS '))
+    const callsLine = lines[callsIndex]
+    if (callsLine === undefined) throw new Error('fake-project driver reported no CALLS line')
+    const calls = JSON.parse(callsLine.slice('CALLS '.length)) as {
+      add_calls: { readonly targetDir: string }[]
+      delete_calls: string[]
+    }
+    return { output: lines.slice(0, callsIndex).join('\n'), addCalls: calls.add_calls, deleteCalls: calls.delete_calls }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+describe('addRenderJobPython empty-return defense (executed against a fake project)', () => {
+  it.skipIf(!python3Available)('resolves an empty return by queue read-back when exactly one new id appears', () => {
+    const run = runBodyWithFakeProject(addRenderJobPython({ targetDir: '/tmp/dsh-render-test' }), {
+      queue_snapshots: [
+        [{ JobId: 'job-a', RenderJobName: 'A' }],
+        [{ JobId: 'job-a', RenderJobName: 'A' }, { JobId: 'job-new', RenderJobName: 'New' }],
+      ],
+      add_returns: [''],
+    })
+    expect(parseOutput(run.output).status).toBe('ok')
+    expect(addRenderJobFrom(parseOutput(run.output).fields)).toEqual({
+      ok: true,
+      data: { jobCount: 2, firstJobName: 'New', jobId: 'job-new', idSource: 'read-back' },
+    })
+    expect(run.addCalls).toEqual([{ targetDir: '/tmp/dsh-render-test' }])
+  })
+
+  it.skipIf(!python3Available)('refuses with ambiguous-job when several new ids appear, without retrying or guessing', () => {
+    const run = runBodyWithFakeProject(addRenderJobPython({ targetDir: '/tmp/dsh-render-test' }), {
+      queue_snapshots: [
+        [{ JobId: 'job-a' }],
+        [{ JobId: 'job-a' }, { JobId: 'job-n1' }, { JobId: 'job-n2' }],
+      ],
+      add_returns: [''],
+    })
+    const parsed = parseOutput(run.output)
+    expect(parsed).toMatchObject({ status: 'error', code: 'ambiguous-job' })
+    expect(parsed.message).toContain('job-n1')
+    expect(parsed.message).toContain('job-n2')
+    expect(run.addCalls).toHaveLength(1)
+  })
+
+  it.skipIf(!python3Available)('retries exactly once after a provably empty first attempt, then confirms by read-back', () => {
+    const run = runBodyWithFakeProject(addRenderJobPython({ targetDir: '/tmp/dsh-render-test' }), {
+      queue_snapshots: [
+        [{ JobId: 'job-a' }],
+        [{ JobId: 'job-a' }],
+        [{ JobId: 'job-a' }, { JobId: 'job-new', RenderJobName: 'New' }],
+      ],
+      add_returns: [''],
+    })
+    expect(parseOutput(run.output).status).toBe('ok')
+    expect(addRenderJobFrom(parseOutput(run.output).fields)).toMatchObject({
+      ok: true,
+      data: { jobId: 'job-new', idSource: 'read-back' },
+    })
+    expect(run.addCalls).toHaveLength(2)
+  })
+
+  it.skipIf(!python3Available)('gives up after the one sanctioned retry and reports that nothing was queued', () => {
+    const run = runBodyWithFakeProject(addRenderJobPython({ targetDir: '/tmp/dsh-render-test' }), {
+      queue_snapshots: [[{ JobId: 'job-a' }], [{ JobId: 'job-a' }], [{ JobId: 'job-a' }]],
+      add_returns: [''],
+    })
+    const parsed = parseOutput(run.output)
+    expect(parsed).toMatchObject({ status: 'error', code: 'api-failed' })
+    expect(parsed.message).toContain('never grew')
+    expect(run.addCalls).toHaveLength(2)
+  })
+
+  it.skipIf(!python3Available)('trusts a direct id return without any retry or read-back requirement', () => {
+    const run = runBodyWithFakeProject(addRenderJobPython({ targetDir: '/tmp/dsh-render-test' }), {
+      queue_snapshots: [[{ JobId: 'job-a' }]],
+      add_returns: ['job-9'],
+    })
+    expect(parseOutput(run.output).status).toBe('ok')
+    expect(addRenderJobFrom(parseOutput(run.output).fields)).toEqual({
+      ok: true,
+      data: { jobCount: 1, firstJobName: 'EP04_20260129', jobId: 'job-9', idSource: 'returned' },
+    })
+    expect(run.addCalls).toHaveLength(1)
+  })
+
+  it.skipIf(!python3Available)('extracts the id from a dict-shaped AddRenderJob return', () => {
+    const run = runBodyWithFakeProject(addRenderJobPython({ targetDir: '/tmp/dsh-render-test' }), {
+      queue_snapshots: [[{ JobId: 'job-a' }]],
+      add_returns: [{ JobId: 'job-dict' }],
+    })
+    expect(parseOutput(run.output).status).toBe('ok')
+    expect(addRenderJobFrom(parseOutput(run.output).fields)).toMatchObject({
+      ok: true,
+      data: { jobId: 'job-dict', idSource: 'returned' },
+    })
+  })
+
+  it.skipIf(!python3Available)('refuses to enqueue at all when the pre-call queue read fails', () => {
+    const run = runBodyWithFakeProject(addRenderJobPython({ targetDir: '/tmp/dsh-render-test' }), {
+      queue_snapshots: [null],
+      add_returns: [''],
+    })
+    const parsed = parseOutput(run.output)
+    expect(parsed).toMatchObject({ status: 'error', code: 'api-failed' })
+    expect(parsed.message).toContain('before enqueue')
+    expect(run.addCalls).toHaveLength(0)
+  })
+
+  it.skipIf(!python3Available)('reports a raising AddRenderJob as an unknown outcome without retrying', () => {
+    const run = runBodyWithFakeProject(addRenderJobPython({ targetDir: '/tmp/dsh-render-test' }), {
+      queue_snapshots: [[{ JobId: 'job-a' }]],
+      add_raises: true,
+    })
+    const parsed = parseOutput(run.output)
+    expect(parsed).toMatchObject({ status: 'error', code: 'api-failed' })
+    expect(parsed.message).toContain('unknown')
+    expect(run.addCalls).toHaveLength(1)
+  })
+})
+
+describe('deleteRenderJobPython targeted delete (executed against a fake project)', () => {
+  it.skipIf(!python3Available)('deletes the passed id and confirms by read-back that it left the queue', () => {
+    const run = runBodyWithFakeProject(deleteRenderJobPython({ jobId: 'job-a' }), {
+      queue_snapshots: [
+        [{ JobId: 'job-a', RenderJobName: 'A' }, { JobId: 'job-b', RenderJobName: 'B' }],
+        [{ JobId: 'job-b', RenderJobName: 'B' }],
+      ],
+    })
+    expect(parseOutput(run.output).status).toBe('ok')
+    expect(deleteRenderJobFrom(parseOutput(run.output).fields)).toEqual({
+      ok: true,
+      data: { done: true, jobId: 'job-a', jobCountAfter: 1 },
+    })
+    expect(run.deleteCalls).toEqual(['job-a'])
+  })
+
+  it.skipIf(!python3Available)('refuses job-not-found for a missing target and never calls the host delete', () => {
+    const run = runBodyWithFakeProject(deleteRenderJobPython({ jobId: 'job-x' }), {
+      queue_snapshots: [[{ JobId: 'job-a' }, { JobId: 'job-b' }]],
+    })
+    const parsed = parseOutput(run.output)
+    expect(parsed).toMatchObject({ status: 'error', code: 'job-not-found' })
+    expect(parsed.message).toContain('job-x')
+    expect(run.deleteCalls).toHaveLength(0)
+  })
+
+  it.skipIf(!python3Available)('refuses job-not-found on an empty queue', () => {
+    const run = runBodyWithFakeProject(deleteRenderJobPython({ jobId: 'job-a' }), {
+      queue_snapshots: [[]],
+    })
+    expect(parseOutput(run.output)).toMatchObject({ status: 'error', code: 'job-not-found' })
+    expect(run.deleteCalls).toHaveLength(0)
+  })
+
+  it.skipIf(!python3Available)('refuses job-not-found on an empty id before touching the queue', () => {
+    const run = runBodyWithFakeProject(deleteRenderJobPython({ jobId: '' }), {
+      queue_snapshots: [[{ JobId: 'job-a' }]],
+    })
+    expect(parseOutput(run.output)).toMatchObject({ status: 'error', code: 'job-not-found' })
+    expect(run.deleteCalls).toHaveLength(0)
+  })
+
+  it.skipIf(!python3Available)('fails loud when the delete reports success but the target is still queued', () => {
+    const run = runBodyWithFakeProject(deleteRenderJobPython({ jobId: 'job-a' }), {
+      queue_snapshots: [
+        [{ JobId: 'job-a' }, { JobId: 'job-b' }],
+        [{ JobId: 'job-a' }, { JobId: 'job-b' }],
+      ],
+    })
+    const parsed = parseOutput(run.output)
+    expect(parsed).toMatchObject({ status: 'error', code: 'api-failed' })
+    expect(parsed.message).toContain('still queued')
+    // exactly one delete of exactly the target: no re-delete, no widening
+    expect(run.deleteCalls).toEqual(['job-a'])
+  })
+
+  it.skipIf(!python3Available)('reports a raising delete as an unknown outcome, still targeting only the passed id', () => {
+    const run = runBodyWithFakeProject(deleteRenderJobPython({ jobId: 'job-a' }), {
+      queue_snapshots: [[{ JobId: 'job-a' }, { JobId: 'job-b' }]],
+      delete_raises: true,
+    })
+    const parsed = parseOutput(run.output)
+    expect(parsed).toMatchObject({ status: 'error', code: 'api-failed' })
+    expect(parsed.message).toContain('unknown')
+    expect(run.deleteCalls).toEqual(['job-a'])
+  })
+
+  it.skipIf(!python3Available)('fails loud when the post-delete read-back cannot be read', () => {
+    const run = runBodyWithFakeProject(deleteRenderJobPython({ jobId: 'job-a' }), {
+      queue_snapshots: [[{ JobId: 'job-a' }], null],
+    })
+    const parsed = parseOutput(run.output)
+    expect(parsed).toMatchObject({ status: 'error', code: 'api-failed' })
+    expect(parsed.message).toContain('read-back failed')
+    expect(run.deleteCalls).toEqual(['job-a'])
   })
 })

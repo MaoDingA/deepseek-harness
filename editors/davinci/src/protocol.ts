@@ -38,6 +38,7 @@ const FAILURE_CODES: readonly DavinciFailureCode[] = [
   'clip-not-found',
   'item-not-found',
   'job-not-found',
+  'ambiguous-job',
   'preset-not-found',
   'bad-tc',
   'api-failed',
@@ -267,9 +268,14 @@ export function renderPresetsFrom(fields: ReadonlyMap<string, string>): DavinciR
 }
 
 /**
- * Project add-render-job fields: the queue outcome and current timeline name.
+ * Project add-render-job fields: the queue outcome and how the new job's id
+ * was established. `id_source=read-back` means the host returned no usable id
+ * and the id came from a queue read-back that showed exactly one new row —
+ * the tool output marks that id 读回确认; multi-candidate and unattributable
+ * outcomes never reach here (the body refuses with `ambiguous-job` /
+ * `api-failed` instead).
  * @param fields - parsed kv fields from the add-render-job body.
- * @returns the enqueue outcome plus the timeline being enqueued.
+ * @returns the enqueue outcome plus the id and its source.
  */
 export function addRenderJobFrom(fields: ReadonlyMap<string, string>): DavinciResult<DavinciRenderJobInfo> {
   const ok = fields.get('ok') === 'true'
@@ -282,6 +288,7 @@ export function addRenderJobFrom(fields: ReadonlyMap<string, string>): DavinciRe
       jobCount: numeric(fields, 'job_count') ?? 1,
       firstJobName: text(fields, 'first_job_name'),
       jobId: text(fields, 'job_id'),
+      idSource: fields.get('id_source') === 'read-back' ? 'read-back' : 'returned',
     },
   }
 }
@@ -302,7 +309,9 @@ export function loadRenderPresetFrom(fields: ReadonlyMap<string, string>): Davin
 
 /**
  * Project delete-render-job fields: the success flag, the deleted job id, and
- * the post-delete queue depth.
+ * the post-delete queue depth. The body prints `done=true` only after its
+ * read-back confirmed the id left the queue, so a truthy `done` here is a
+ * confirmed deletion, never a host promise taken on faith.
  * @param fields - parsed kv fields from the delete-render-job body.
  * @returns the mutation outcome plus the job id and queue depth.
  */

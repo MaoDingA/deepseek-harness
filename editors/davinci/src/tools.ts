@@ -98,7 +98,7 @@ const RESOLVE_SECTION = `DaVinci Resolve editing conventions:
     a. 音画合套 (audio-picture conformance): the show ships picture cut as separate V1 segments (camcorder MXFs) plus one long audio delivery (SOUNDS/*.wav, roughly one episode of final mix). The picture segments are already on V1; the 套片 step is (1) confirming the A1 delivery covers each V1 segment frame-accurately and (2) flagging any V1 segment whose picture does not line up with the A1 mix (typically a scene re-cut after the mix was finalized). Read the A1 items first with resolve_audio_timeline_items and compare against V1 with resolve_timeline_items; resolve_find_by_tc is the TC-side match when the A1 has a continuous Start TC.
     b. 嵌套组装 (nested assembly): the show ships the cut as a nested timeline (a timeline named after the delivery date, e.g. "EP04_20260129", imported into a parent timeline as a single item on V1). 套片 in this form = "place the nested timeline onto the parent timeline at the right record frame". Use resolve_place_clip with the TL bin (nested-timeline items live there) or a fresh nested clip from SOUNDS as the picture; use resolve_delete_item / resolve_add_marker when cleaning stray duplicates.
   - 贴视效 (tie shi xiao) = paste VFX deliverables (VFX/*.mov, e.g. ZY_EP05_1630_CMP_v002.mov) from the VFX bin onto V2 aligned to the matching V1 segment's start frame (the V2-paste convention already encoded in resolve_place_clip's description). The deliverable's source Start TC is the matching anchor; prefer resolve_find_by_tc over paging.
-  - 输出 (shu chu) = the render-queue flow: confirm current render settings with resolve_render_status (live job/render flag, current format/codec, preset+format counts), inspect the selectable preset list with resolve_render_presets (Resolve 21+ surface, returns an empty list on Resolve 20.x), switch the active preset with resolve_load_render_preset (name must match a resolve_render_presets entry; 21.x only), enqueue the current timeline with resolve_add_render_job (returns the job's id), cancel a queued job with resolve_delete_render_job (by its id), start with resolve_start_rendering, and stop with resolve_stop_rendering. Changing the active format/codec requires the Deliver page or a script outside this plugin.
+  - 输出 (shu chu) = the render-queue flow: confirm current render settings with resolve_render_status (live job/render flag, current format/codec, preset+format counts), inspect the selectable preset list with resolve_render_presets (empty when this build exposes none), switch the active preset with resolve_load_render_preset (name must match a resolve_render_presets entry), enqueue the current timeline with resolve_add_render_job (returns the job's id, marked 读回确认 when resolved by queue read-back), cancel a queued job with resolve_delete_render_job (by its id), start with resolve_start_rendering, and stop with resolve_stop_rendering. Changing the active format/codec requires the Deliver page or a script outside this plugin.
 - Mutating tools (place/delete/marker/render-queue/render-control) are approval-gated one-shot: the approval prompt is how the user consents, so never detour through chat to ask permission first, and never retry a rejected mutation unchanged.
 - After any mutation, re-read the affected state with resolve_timeline_items or resolve_render_status to confirm the result before reporting success.`
 
@@ -194,7 +194,7 @@ function renderStatusText(info: DavinciRenderStatusInfo): string {
   if (info.presetCount !== undefined) lines.push(`preset_count=${info.presetCount}`)
   if (info.formatCount !== undefined) lines.push(`format_count=${info.formatCount}`)
   if (info.presetCount === 0 && info.formatCount === 0) {
-    lines.push('the host build reports no presets and an empty GetRenderFormats — the active UI-set render settings are the only selectable surface')
+    lines.push('this Resolve build reports no presets and no selectable formats — the active UI-set render settings are the only selectable surface')
   }
   return lines.join('\n')
 }
@@ -208,16 +208,25 @@ function renderPresetsText(info: DavinciRenderPresetsInfo): string {
   if (info.presetCount > 0) {
     lines.push(`presets=${info.presets.map((n) => `"${n}"`).join(', ')}`)
   } else {
-    lines.push('the host build lacks GetRenderPresets (Resolve 20.x); use the UI-set active settings as the only selectable surface')
+    lines.push('this Resolve build exposes no preset list; use the active UI-set settings as the only selectable surface')
   }
   return lines.join('\n')
 }
 
-function addRenderJobText(info: DavinciRenderJobInfo): string {
+/**
+ * Render the model-facing result lines of `resolve_add_render_job`. A
+ * read-back-resolved id carries the 读回确认 marker so the model can tell it
+ * apart from a host-returned id when it later targets the id.
+ * @param info - the projected enqueue outcome.
+ * @returns the `key=value` result text.
+ */
+export function addRenderJobText(info: DavinciRenderJobInfo): string {
   const lines = [
     `queued_jobs=${info.jobCount}`,
   ]
-  if (info.jobId !== undefined) lines.push(`job_id=${info.jobId}`)
+  if (info.jobId !== undefined) {
+    lines.push(info.idSource === 'read-back' ? `job_id=${info.jobId} (读回确认)` : `job_id=${info.jobId}`)
+  }
   if (info.firstJobName !== undefined) lines.push(`first_job=${info.firstJobName}`)
   return lines.join('\n')
 }
@@ -435,7 +444,7 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'resolve_render_status',
     description:
-      'Read the live render-engine state: queued-job count, is-rendering flag, the current (format, codec) pair, the format\'s codec-list size, and — when the host exposes it — the preset and format list sizes. Read-only. Use before enqueueing or starting a render to confirm the current Resolve settings.',
+      'Read the live render-engine state: queued-job count, is-rendering flag, the current (format, codec) pair, and the sizes of the selectable preset and format lists (absent on builds without them). Read-only. Use before enqueueing or starting a render to confirm the current Resolve settings.',
     parameters: {},
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
     timeoutMs: 30_000,
@@ -447,7 +456,7 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'resolve_render_presets',
     description:
-      'Read the render-engine\'s active (format, codec) pair and the host\'s render preset list (Resolve 21+ surface; empty on Resolve 20.x). Read-only.',
+      'Read the render engine\'s active (format, codec) pair and the selectable render preset list (empty when this Resolve build exposes none). Read-only. Use before switching presets or enqueueing to confirm what will render.',
     parameters: {},
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
     timeoutMs: 30_000,
@@ -459,7 +468,7 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'resolve_add_render_job',
     description:
-      'Enqueue the current timeline into the render queue at `targetDir`. Preserves the current render preset/format/codec. Returns the new job\'s id (a UUID on Resolve 21.x) — use it with `resolve_delete_render_job` to cancel, or `resolve_start_rendering` / `resolve_stop_rendering` to launch. Read `resolve_render_status` first to confirm the active (format, codec) and queue depth. Approval-gated: the approval prompt is how the user consents — do not ask in chat first.',
+      'Enqueue the current timeline into the render queue for output under an absolute target directory. Keeps the currently active render settings. Returns the new job\'s id — use it to cancel the job (resolve_delete_render_job) or start/stop rendering (resolve_start_rendering / resolve_stop_rendering). Confirm the active render settings and queue depth with resolve_render_status first. When the queue does not confirm exactly one new job, the call refuses with an error instead of guessing. Approval-gated: the approval prompt is how the user consents — do not ask in chat first.',
     parameters: {
       targetDir: { type: 'string', required: true, description: 'Absolute target directory the render output will land in' },
     },
@@ -479,7 +488,7 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'resolve_load_render_preset',
     description:
-      'Load a render preset by exact name via `Project:LoadRenderPreset`. The name must match an entry from `resolve_render_presets` (a list of preset names on Resolve 21.x). Refuses with `preset-not-found` when the build lacks the API (Resolve 20.x) or the name is not in the list. Approval-gated: the approval prompt is how the user consents — do not ask in chat first.',
+      'Make one render preset active by its exact name; the name must match an entry resolve_render_presets listed. Refuses when the name is not in that list or this Resolve build cannot switch presets. The active render settings stay as they are on any refusal. Approval-gated: the approval prompt is how the user consents — do not ask in chat first.',
     parameters: {
       presetName: { type: 'string', required: true, description: 'Exact preset name as reported by resolve_render_presets (case-sensitive).' },
     },
@@ -499,9 +508,9 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'resolve_delete_render_job',
     description:
-      'Delete a single queued render job by its id via `Project:DeleteRenderJob`. The id must be one of the `job_id` values returned by `resolve_add_render_job` (or a row in `p:GetRenderJobList()` on Resolve 21.x). Refuses with `job-not-found` when the queue is empty or the id matches no row; `api-failed` when the host refuses. Does not start or stop rendering. Approval-gated: the approval prompt is how the user consents — do not ask in chat first.',
+      'Cancel one queued render job by the exact id resolve_add_render_job returned. The deletion is confirmed by reading the queue back, so success is only reported once the job is really gone; a refusal names why (no queued job has that id / the queue is empty / the host refused) and never deletes anything else. Does not start or stop rendering. Approval-gated: the approval prompt is how the user consents — do not ask in chat first.',
     parameters: {
-      jobId: { type: 'string', required: true, description: 'The job id (UUID) returned by resolve_add_render_job.' },
+      jobId: { type: 'string', required: true, description: 'The job id returned by resolve_add_render_job.' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
     timeoutMs: 30_000,

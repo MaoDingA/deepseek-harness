@@ -107,6 +107,21 @@ def _dsh_main():
             return float(project.GetSetting('timelineFrameRate'))
         except (TypeError, ValueError):
             return 25.0
+
+    def render_job_id(row):
+        # Queued render-job id across host row shapes: dict rows carry JobId
+        # (Resolve 21 tables); remote objects expose GetJobId() (20.x); other
+        # shapes read as id-less.
+        if isinstance(row, dict):
+            v = row.get('JobId')
+            return None if v is None else s(v)
+        if hasattr(row, 'GetJobId'):
+            try:
+                v = row.GetJobId()
+                return None if v is None else s(v)
+            except Exception:
+                return None
+        return None
 `
 
 /**
@@ -685,77 +700,154 @@ if has_get_formats:
 }
 
 /**
- * Body enqueuing the current timeline into the render queue at `targetDir`.
+ * Body enqueuing the current timeline into the render queue at `targetDir`,
+ * with the empty-return defense around `Project:AddRenderJob`. The host
+ * sometimes returns `''` (or an uncertain shape) even though a job was
+ * queued, so the body never trusts a falsy return and never guesses from
+ * list order:
+ *
+ * 1. before the call, snapshot the queued-job id set (ids of every
+ *    `GetRenderJobList` row); a raised or `None` pre-read refuses to enqueue
+ *    at all — without a baseline no delta could ever be attributed;
+ * 2. a non-empty id return is used directly (`id_source=returned`);
+ * 3. an empty or uncertain return routes into a queue read-back: exactly one
+ *    new id ⇒ that id, marked `id_source=read-back` (the tool output then
+ *    flags it 读回确认); more than one new id ⇒ an `ambiguous-job` refusal —
+ *    no first-row guess, no retry, no further enqueue; zero new ids ⇒ the
+ *    synchronous call has provably ended and added nothing, so the one-retry
+ *    policy re-runs `AddRenderJob` exactly once against the fresh baseline
+ *    (the post-attempt-1 id set); a second empty outcome is a final
+ *    `api-failed` — nothing was queued;
+ * 4. an exception from `AddRenderJob`, or a failed post-call read-back, is an
+ *    UNKNOWN outcome: refuse without retrying — a retry could double-enqueue.
+ *
  * The current render preset/format/codec are preserved; this call does not
  * change them. Resolve 20.3.2.9 has no presets and an empty format list, so
  * the active (UI-set) render settings are the only selectable surface.
  * @param request - the enqueue coordinates (target dir).
- * @returns Python source for {@link pythonScriptOf}.
+ * @returns Python source for {@link pythonScriptOf}, printing `ok=true`,
+ *   `job_id`, `id_source` (`returned` or `read-back`), `job_count`, and
+ *   `first_job_name` on success; `ERROR <code>: <message>` otherwise.
  */
 export function addRenderJobPython(request: DavinciAddRenderJobRequest): string {
   return `
 t = current_timeline()
 if t is None:
     return
-before = 0
-pre = project.GetRenderJobList()
-if pre is not None:
-    before = len(pre)
+
+def render_job_name(row):
+    if isinstance(row, dict):
+        v = row.get('RenderJobName')
+        if v is None:
+            v = row.get('Name')
+        return None if v is None else s(v)
+    if hasattr(row, 'GetName'):
+        try:
+            v = row.GetName()
+            return None if v is None else s(v)
+        except Exception:
+            return None
+    return None
+
+def queue_ids():
+    # Snapshot of every queued job id; None means the queue read itself failed
+    # (raised or returned None), which is distinct from an empty queue.
+    try:
+        rows = project.GetRenderJobList()
+    except Exception:
+        return None
+    if rows is None:
+        return None
+    ids = []
+    for row in each(rows):
+        rid = render_job_id(row)
+        if rid is not None and rid != '' and rid not in ids:
+            ids.append(rid)
+    return ids
+
+def extract_returned_id(value):
+    # AddRenderJob's return across host shapes: a str id, a dict carrying
+    # JobId, an object exposing GetJobId(); absent/falsy/other shapes read as
+    # '' (uncertain) and route into the queue read-back.
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        v = value.get('JobId')
+        return '' if v is None else s(v)
+    if hasattr(value, 'GetJobId'):
+        try:
+            v = value.GetJobId()
+            return '' if v is None else s(v)
+        except Exception:
+            return ''
+    return ''
+
+pre_ids = queue_ids()
+if pre_ids is None:
+    print('ERROR api-failed: the render queue could not be read before enqueue; refusing to add a job without a pre-call queue snapshot')
+    return
 settings = {
     'targetDir': ${JSON.stringify(request.targetDir)},
 }
-job = project.AddRenderJob(settings)
-jobs = project.GetRenderJobList()
-n = len(jobs) if jobs is not None else 0
-if n <= before and (job is None or job is False):
-    print('ERROR api-failed: AddRenderJob returned falsy and the queue did not grow; verify the current render preset and target dir exist')
+baseline = pre_ids
+attempts = 0
+candidate = ''
+source = ''
+while attempts < 2:
+    # At most one retry, and only after a returned call whose queue delta was
+    # provably empty; every other outcome leaves the loop or refuses.
+    attempts = attempts + 1
+    try:
+        returned = extract_returned_id(project.AddRenderJob(settings))
+    except Exception:
+        print('ERROR api-failed: AddRenderJob raised an exception; the enqueue outcome is unknown - read resolve_render_status before any retry')
+        return
+    if returned != '':
+        candidate = returned
+        source = 'returned'
+        break
+    post_ids = queue_ids()
+    if post_ids is None:
+        print('ERROR api-failed: AddRenderJob returned no id and the queue read-back failed; the enqueue outcome is unknown - read resolve_render_status before any retry')
+        return
+    fresh = []
+    for i in post_ids:
+        if i not in baseline and i not in fresh:
+            fresh.append(i)
+    if len(fresh) == 1:
+        candidate = fresh[0]
+        source = 'read-back'
+        break
+    if len(fresh) > 1:
+        print('ERROR ambiguous-job: ' + str(len(fresh)) + ' new jobs appeared while AddRenderJob returned no id, so this call cannot be attributed to one job; candidates: ' + ', '.join(fresh) + '. No id is reported, nothing further is enqueued, and nothing is deleted - read resolve_render_status and disambiguate.')
+        return
+    # Zero new jobs: the synchronous call has ended and the queue provably did
+    # not grow, so the one-retry policy allows exactly one more attempt.
+    baseline = post_ids
+if candidate == '':
+    print('ERROR api-failed: AddRenderJob returned no id twice and the queue never grew; nothing was queued')
     return
 
-def row_id(row):
-    if isinstance(row, dict):
-        return row.get('JobId')
-    if hasattr(row, 'GetJobId'):
-        return row.GetJobId()
-    return None
-
-def row_name(row):
-    if isinstance(row, dict):
-        name = row.get('RenderJobName')
-        if name is None:
-            name = row.get('Name')
-        return name
-    if hasattr(row, 'GetName'):
-        return row.GetName()
-    return None
-
-# The added job is the one whose id was absent from the pre-call snapshot;
-# trusting list order (first row) would report a pre-existing job's id.
-pre_ids = set()
-if pre is not None:
-    for row in pre:
-        pid = row_id(row)
-        if pid is not None:
-            pre_ids.add(s(pid))
-job_id = job
-if isinstance(job, dict):
-    job_id_value = job.get('JobId')
-    if job_id_value is not None:
-        job_id = job_id_value
-if job is not None and not isinstance(job, dict) and hasattr(job, 'GetJobId'):
-    job_id = job.GetJobId()
-first_job_name = s(t.GetName())
-if jobs is not None:
-    for row in jobs:
-        rid = row_id(row)
-        if rid is not None and s(rid) not in pre_ids:
-            job_id = rid
-            nm = row_name(row)
+job_name = s(t.GetName())
+job_count = None
+try:
+    rows = project.GetRenderJobList()
+except Exception:
+    rows = None
+if rows is not None:
+    job_count = len(each(rows))
+    for row in each(rows):
+        if render_job_id(row) == candidate:
+            nm = render_job_name(row)
             if nm is not None:
-                first_job_name = s(nm)
+                job_name = nm
+                break
 print('ok=true')
-print('job_id=' + s(job_id))
-print('job_count=' + str(n))
-print('first_job_name=' + first_job_name)
+print('job_id=' + s(candidate))
+print('id_source=' + source)
+if job_count is not None:
+    print('job_count=' + str(job_count))
+print('first_job_name=' + job_name)
 `
 }
 
@@ -797,13 +889,25 @@ print('loaded_preset=' + s(first))
 }
 
 /**
- * Body deleting a queued render job by its id via `Project:DeleteRenderJob`.
- * The id is matched against each row's `JobId` field (table shape, Resolve 21)
- * or `GetJobId()` method (remote-object shape, Resolve 20.x); a miss is a
- * `job-not-found` refusal and no delete is attempted.
+ * Body deleting one queued render job by its id via `Project:DeleteRenderJob`,
+ * with targeted-delete and read-back guarantees:
+ *
+ * - the passed id is the only delete target: it must match the `JobId` field
+ *   of a `GetRenderJobList` row (table shape, Resolve 21) or a `GetJobId()`
+ *   method (remote-object shape, 20.x); a miss (or an empty queue/id) is a
+ *   `job-not-found` refusal and the host delete is never invoked;
+ * - `done=true` prints only after a post-delete read-back confirms the id left
+ *   the queue; a contradictory read-back (id still queued) or a failed
+ *   read-back is an `api-failed` refusal, never a success;
+ * - exceptions from the queue reads or the delete itself surface as
+ *   `api-failed` with an unknown-outcome message. No path deletes anything
+ *   except the single passed id — the body contains no clear-queue or
+ *   delete-all fallback, so a failing delete can never widen into deleting
+ *   the rest of the queue.
  * @param request - the job id (UUID) reported by `resolve_add_render_job`.
- * @returns Python source for {@link pythonScriptOf}, printing `done=true|false`
- *   and the post-delete queue depth.
+ * @returns Python source for {@link pythonScriptOf}, printing `done=true`,
+ *   `job_id`, and the post-delete queue depth on success;
+ *   `ERROR <code>: <message>` otherwise.
  */
 export function deleteRenderJobPython(request: DavinciDeleteRenderJobRequest): string {
   return `
@@ -811,30 +915,52 @@ job_id = ${JSON.stringify(request.jobId)}
 if job_id == '':
     print('ERROR job-not-found: empty job id')
     return
-jobs = project.GetRenderJobList()
-n = len(jobs) if jobs is not None else 0
+
+def queue_rows():
+    # Live queue rows; None means the queue read itself failed (raised or
+    # returned None), which is distinct from an empty queue.
+    try:
+        return project.GetRenderJobList()
+    except Exception:
+        return None
+
+rows = queue_rows()
+if rows is None:
+    print('ERROR api-failed: the render queue could not be read; refusing to delete without confirming the target job is queued')
+    return
+n = len(each(rows))
 if n == 0:
     print('ERROR job-not-found: the render queue is empty; nothing to delete')
     return
 found = False
-for row in jobs:
-    rid = None
-    if isinstance(row, dict):
-        rid = row.get('JobId')
-    elif hasattr(row, 'GetJobId'):
-        rid = row.GetJobId()
-    if rid == job_id:
+for row in each(rows):
+    if render_job_id(row) == job_id:
         found = True
         break
 if not found:
-    print('ERROR job-not-found: no queued job has id ' + job_id)
+    print('ERROR job-not-found: no queued job has id ' + job_id + '; nothing was deleted')
     return
-ok = project.DeleteRenderJob(job_id)
+try:
+    ok = project.DeleteRenderJob(job_id)
+except Exception:
+    print('ERROR api-failed: DeleteRenderJob raised an exception; the outcome is unknown - read resolve_render_status. Only the passed job id is ever targeted, so no other queued job can be affected here.')
+    return
 if ok is False:
     print('ERROR api-failed: Resolve refused to delete job ' + job_id)
     return
-after = project.GetRenderJobList()
-m = len(after) if after is not None else 0
+after = queue_rows()
+if after is None:
+    print('ERROR api-failed: the delete call returned but the queue read-back failed, so the deletion could not be confirmed - read resolve_render_status')
+    return
+still_queued = False
+m = 0
+for row in each(after):
+    m = m + 1
+    if render_job_id(row) == job_id:
+        still_queued = True
+if still_queued:
+    print('ERROR api-failed: the delete call reported success but job ' + job_id + ' is still queued; no further delete was attempted and every other queued job is untouched')
+    return
 print('done=true')
 print('job_id=' + job_id)
 print('job_count_after=' + str(m))

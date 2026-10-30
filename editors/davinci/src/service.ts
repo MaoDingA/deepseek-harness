@@ -317,13 +317,27 @@ export abstract class DavinciService extends Service {
   }
 
   /**
-   * Enqueue the current timeline into the render queue at `targetDir`. The
-   * current render preset/format/codec are preserved (this Resolve 20.3.2.9
-   * build has no presets and an empty format list, so the UI-set active
-   * render settings are the only selectable surface).
+   * Enqueue the current timeline into the render queue at `targetDir`, with
+   * the empty-return defense (`Project:AddRenderJob` sometimes returns `''`
+   * even though a job was queued):
+   *
+   * - the queued-id set is snapshotted before the call; a failed pre-read
+   *   refuses to enqueue (no baseline ⇒ no attribution);
+   * - a non-empty id return is used as-is (`idSource` of `'returned'`);
+   * - an empty/uncertain return resolves the id by queue read-back: exactly
+   *   one new id ⇒ return it with `idSource` of `'read-back'` (the tool
+   *   output marks it 读回确认); several new ids ⇒ an `ambiguous-job`
+   *   refusal (no first-row guess, no retry); zero new ids ⇒ exactly one
+   *   retry (the synchronous call had provably ended and added nothing);
+   *   still nothing ⇒ `api-failed`;
+   * - a raising call or failed read-back is an unknown outcome and never
+   *   retries (a retry could double-enqueue).
+   *
+   * The current render preset/format/codec are preserved (on Resolve 20.x
+   * the UI-set active render settings are the only selectable surface).
    * @param placement - the enqueue coordinates.
    * @param request - call envelope.
-   * @returns the enqueue outcome plus the enqueued timeline name, or a coded failure.
+   * @returns the enqueue outcome plus the job id and its source, or a coded failure.
    */
   async addRenderJob(placement: DavinciAddRenderJobRequest, request: DavinciCallRequest = {}): Promise<DavinciResult<DavinciRenderJobInfo>> {
     return this.run(addRenderJobPython(placement), request, addRenderJobFrom)
@@ -360,7 +374,14 @@ export abstract class DavinciService extends Service {
   }
 
   /**
-   * Delete a queued render job by its id via `Project:DeleteRenderJob`.
+   * Delete one queued render job by its id via `Project:DeleteRenderJob`.
+   * The passed id is the only delete target: it must match a queued row's
+   * `JobId` (Resolve 21 table shape) or `GetJobId()` (20.x remote-object
+   * shape), the host delete is never invoked on a miss, and `done` is true
+   * only after a post-delete read-back confirms the id left the queue. No
+   * failure path widens the delete — the rest of the queue is never cleared
+   * or touched, so a wedged or raising host can at worst leave the call
+   * refused with an unknown-outcome message.
    * @param request - the job id (UUID) to delete.
    * @param envelope - call envelope.
    * @returns the mutation outcome plus the job id and post-delete queue depth.

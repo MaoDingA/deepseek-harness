@@ -46,6 +46,7 @@ export type DavinciFailureCode =
   | 'clip-not-found'
   | 'item-not-found'
   | 'job-not-found'
+  | 'ambiguous-job'
   | 'preset-not-found'
   | 'bad-tc'
   | 'api-failed'
@@ -231,17 +232,23 @@ export interface DavinciRenderPresetsInfo {
 /**
  * Queued render job, as read from Resolve after enqueue.
  *
- * Resolve 21.1 reports the new job's id in `jobId` (a UUID string read from
- * the `JobId` table field of the newest `GetRenderJobList()` row) and its
- * queue name in `firstJobName`. On 20.x both are reported as-is — `jobId`
- * is the `JobId` field of the newest row when the host exposes the table
- * shape, otherwise `firstJobName`. `jobCount` is the post-enqueue queue
- * depth.
+ * The enqueue body snapshots the queued-id set before the call; when
+ * `AddRenderJob` returns a usable id it lands in `jobId` with
+ * `idSource` of `'returned'`, and when the return is empty or uncertain the
+ * id is resolved by a queue read-back that must show exactly one new id
+ * (`idSource` of `'read-back'`, rendered with a 读回确认 marker). Multiple
+ * new ids or an unattributable outcome refuse with `ambiguous-job` /
+ * `api-failed` instead of guessing.
+ *
+ * Resolve 21.1 reports the new job's id in `jobId` and its queue name in
+ * `firstJobName`; `jobCount` is the post-enqueue queue depth.
  */
 export interface DavinciRenderJobInfo {
   readonly jobCount: number
   readonly firstJobName: string | undefined
   readonly jobId: string | undefined
+  /** How `jobId` was established: the host's return, or a queue read-back. */
+  readonly idSource: 'returned' | 'read-back'
 }
 
 /** Add-render-job request: enqueue the current timeline into the render queue. */

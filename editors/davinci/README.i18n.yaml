@@ -1,0 +1,31 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write editors/davinci/README.md
+/deepseek-ai-dsh-davinci-editors-davinci:
+  en: 466839eda0c8c986
+  zh: c92c41c41326aabb
+/deepseek-ai-dsh-davinci-editors-davinci/architecture:
+  en: 31c625ad487b01ae
+  zh: 409726825f101882
+/deepseek-ai-dsh-davinci-editors-davinci/tool-surface-19-tools:
+  en: c2a49b294ac8017f
+  zh: d144558b4da8287d
+/deepseek-ai-dsh-davinci-editors-davinci/tool-surface-19-tools/domain-terms-also-recorded-in-the-resolve-section-prompt-section:
+  en: 24a07881de3ae397
+  zh: a1900ea5a35f6064
+/deepseek-ai-dsh-davinci-editors-davinci/config-cordis-yml:
+  en: 728ac21fb5ed1e65
+  zh: 61c77bad64beda63
+/deepseek-ai-dsh-davinci-editors-davinci/mounting-and-running:
+  en: ba6aa2e5c049cef4
+  zh: 11eaba4220e6d070
+/deepseek-ai-dsh-davinci-editors-davinci/tests:
+  en: 0cd8afb1406b8fa9
+  zh: d1e4e651c6ee1d63
+/deepseek-ai-dsh-davinci-editors-davinci/model-experience:
+  en: 7809381bcb3dab84
+  zh: c18dc5e113c058e5
+/deepseek-ai-dsh-davinci-editors-davinci/known-limitations-and-deferred-work:
+  en: bb4b86599b84e46c
+  zh: 689d623de9d9f713
