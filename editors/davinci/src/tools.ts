@@ -14,7 +14,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 // Type-only: makes `ctx.get('approval')` resolve to the ApprovalService
 // augmentation. The seam stays optional at runtime.
 import type {} from '@deepseek-ai/dsh-user-approval'
-import { captureScreenshot, DAVINCI_MARKER_COLORS, discoverFuscript, type Config } from './provider.ts'
+import { DAVINCI_MARKER_COLORS, discoverResolveMcp, type Config } from './provider.ts'
 import type {
   DavinciAudioTimelineItemsInfo,
   DavinciFindClipInfo,
@@ -98,7 +98,7 @@ const RESOLVE_SECTION = `DaVinci Resolve editing conventions:
     a. 音画合套 (audio-picture conformance): the show ships picture cut as separate V1 segments (camcorder MXFs) plus one long audio delivery (SOUNDS/*.wav, roughly one episode of final mix). The picture segments are already on V1; the 套片 step is (1) confirming the A1 delivery covers each V1 segment frame-accurately and (2) flagging any V1 segment whose picture does not line up with the A1 mix (typically a scene re-cut after the mix was finalized). Read the A1 items first with resolve_audio_timeline_items and compare against V1 with resolve_timeline_items; resolve_find_by_tc is the TC-side match when the A1 has a continuous Start TC.
     b. 嵌套组装 (nested assembly): the show ships the cut as a nested timeline (a timeline named after the delivery date, e.g. "EP04_20260129", imported into a parent timeline as a single item on V1). 套片 in this form = "place the nested timeline onto the parent timeline at the right record frame". Use resolve_place_clip with the TL bin (nested-timeline items live there) or a fresh nested clip from SOUNDS as the picture; use resolve_delete_item / resolve_add_marker when cleaning stray duplicates.
   - 贴视效 (tie shi xiao) = paste VFX deliverables (VFX/*.mov, e.g. ZY_EP05_1630_CMP_v002.mov) from the VFX bin onto V2 aligned to the matching V1 segment's start frame (the V2-paste convention already encoded in resolve_place_clip's description). The deliverable's source Start TC is the matching anchor; prefer resolve_find_by_tc over paging.
-  - 输出 (shu chu) = the render-queue flow: confirm current render settings with resolve_render_status (live job/render flag, current format/codec, preset+format counts), inspect the selectable preset list with resolve_render_presets (Resolve 21+ surface, returns an empty list on Resolve 20.x), switch the active preset with resolve_load_render_preset (name must match a resolve_render_presets entry; 21.x only), enqueue the current timeline with resolve_add_render_job (returns the job's id), cancel a queued job with resolve_delete_render_job (by its id), start with resolve_start_rendering, and stop with resolve_stop_rendering. Changing the active format/codec requires the Deliver page or a fuscript outside this plugin.
+  - 输出 (shu chu) = the render-queue flow: confirm current render settings with resolve_render_status (live job/render flag, current format/codec, preset+format counts), inspect the selectable preset list with resolve_render_presets (Resolve 21+ surface, returns an empty list on Resolve 20.x), switch the active preset with resolve_load_render_preset (name must match a resolve_render_presets entry; 21.x only), enqueue the current timeline with resolve_add_render_job (returns the job's id), cancel a queued job with resolve_delete_render_job (by its id), start with resolve_start_rendering, and stop with resolve_stop_rendering. Changing the active format/codec requires the Deliver page or a script outside this plugin.
 - Mutating tools (place/delete/marker/render-queue/render-control) are approval-gated one-shot: the approval prompt is how the user consents, so never detour through chat to ask permission first, and never retry a rejected mutation unchanged.
 - After any mutation, re-read the affected state with resolve_timeline_items or resolve_render_status to confirm the result before reporting success.`
 
@@ -341,11 +341,13 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
     timeoutMs: 15_000,
     async execute(args) {
-      const fuscript = args.activate === true ? config.fuscriptPath ?? discoverFuscript() : undefined
-      if (args.activate === true && fuscript === undefined) {
-        throw new Error('activate requested but no DaVinci Resolve install found under /Applications — set fuscriptPath in config')
+      if (args.activate === true && config.resolveMcpPath === undefined && discoverResolveMcp() === undefined) {
+        throw new Error('activate requested but no DaVinci Resolve install found under /Applications — set resolveMcpPath in config')
       }
-      return captureScreenshot(config.screenshotDir ?? '.resolve-agent', { fuscriptForActivation: fuscript })
+      return await ctx.davinci.screenshot({
+        activate: args.activate === true,
+        screenshotDir: config.screenshotDir ?? '.resolve-agent',
+      })
     },
   }))
 

@@ -6,6 +6,7 @@ import {
   deleteRenderJobFrom,
   findByTcFrom,
   findClipFrom,
+  innerResponseToRaw,
   loadRenderPresetFrom,
   mediaPoolFrom,
   mutationFrom,
@@ -13,29 +14,11 @@ import {
   projectInfoFrom,
   renderingControlFrom,
   renderStatusFrom,
+  scriptTimeoutSeconds,
   seekFrom,
-  stripBanner,
   switchTimelineFrom,
   timelineItemsFrom,
 } from '../src/protocol.ts'
-
-describe('stripBanner', () => {
-  it('drops banner and blank lines, keeps content', () => {
-    const raw = [
-      'DaVinci Resolve Script Interpreter 20.0',
-      'Copyright (C) 2013-2026 Blackmagic Design',
-      '',
-      'Shell cwd was reset to /tmp',
-      'resolve_version=20.0',
-      '',
-    ].join('\n')
-    expect(stripBanner(raw)).toBe('resolve_version=20.0')
-  })
-
-  it('keeps lines that merely contain banner words', () => {
-    expect(stripBanner('timeline_1=Copyright matters')).toBe('timeline_1=Copyright matters')
-  })
-})
 
 describe('parseOutput', () => {
   it('collects key=value fields, splitting at the first =', () => {
@@ -335,5 +318,53 @@ describe('clampTimeout', () => {
     expect(clampTimeout(999_000, 30_000, 120_000)).toBe(120_000)
     expect(clampTimeout(10, 30_000, 120_000)).toBe(1_000)
     expect(clampTimeout(45_000, 30_000, 120_000)).toBe(45_000)
+  })
+})
+
+describe('scriptTimeoutSeconds', () => {
+  it('ceils partial seconds and clamps into the run_script 1..60 range', () => {
+    expect(scriptTimeoutSeconds(30_000)).toBe(30)
+    expect(scriptTimeoutSeconds(1_500)).toBe(2)
+    expect(scriptTimeoutSeconds(500)).toBe(1)
+    expect(scriptTimeoutSeconds(60_000)).toBe(60)
+    expect(scriptTimeoutSeconds(90_000)).toBe(60)
+  })
+})
+
+describe('innerResponseToRaw', () => {
+  it('passes a captured print payload through verbatim', () => {
+    expect(innerResponseToRaw('run_script', JSON.stringify({ output: 'a=1\nb=2\n' }))).toBe('a=1\nb=2\n')
+  })
+
+  it('returns empty output when the payload carries no output field', () => {
+    expect(innerResponseToRaw('run_script', JSON.stringify({ result: 42 }))).toBe('')
+    expect(innerResponseToRaw('run_script', JSON.stringify({}))).toBe('')
+  })
+
+  it('maps a sandbox timeout to the timeout code with the verbatim text', () => {
+    const raw = innerResponseToRaw('run_script', JSON.stringify({ error: 'Script timed out after 2s. Avoid long iterations; fetch only what you need.' }))
+    const parsed = parseOutput(raw)
+    expect(parsed).toMatchObject({
+      status: 'error',
+      code: 'timeout',
+      message: 'Script timed out after 2s. Avoid long iterations; fetch only what you need.',
+    })
+  })
+
+  it('maps a traceback to api-failed with only the exception line as the message', () => {
+    const trace = 'Traceback (most recent call last):\n  File "<script>", line 1, in <module>\n    raise RuntimeError("boom")\nRuntimeError: boom\n'
+    const parsed = parseOutput(innerResponseToRaw('run_script', JSON.stringify({ error: trace })))
+    expect(parsed).toMatchObject({ status: 'error', code: 'api-failed', message: 'RuntimeError: boom' })
+  })
+
+  it('maps a SyntaxError report (no Traceback header) to the same api-failed shape', () => {
+    const trace = '  File "<script>", line 23\n    print("x"\n     ^\nSyntaxError: \'(\' was never closed\n'
+    const parsed = parseOutput(innerResponseToRaw('run_script', JSON.stringify({ error: trace })))
+    expect(parsed).toMatchObject({ status: 'error', code: 'api-failed', message: "SyntaxError: '(' was never closed" })
+  })
+
+  it('fails loud on a non-inner-JSON reply, naming the tool', () => {
+    expect(() => innerResponseToRaw('run_script_unsafe', 'Error: DaVinci Resolve Studio is not installed'))
+      .toThrow(/run_script_unsafe response was not inner JSON.*DaVinci Resolve Studio is not installed/)
   })
 })

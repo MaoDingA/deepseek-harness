@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-davinci",
-  "description": "DaVinci Resolve capability: fuscript-backed service + local provider + model-facing resolve_* tools (combined in-tree editor plugin, source-launched)",
+  "description": "DaVinci Resolve capability: davinci-mcp stdio service + local provider + model-facing resolve_* tools (combined in-tree editor plugin, source-launched)",
   "version": "0.1.0-rc.5",
   "private": true,
   "type": "module",

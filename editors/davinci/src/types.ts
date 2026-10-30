@@ -12,22 +12,30 @@
 export interface DavinciCallRequest {
   /** Requested execution budget in milliseconds; clamped by provider config. */
   readonly timeoutMs?: number
-  /** Cooperative cancellation forwarded to the spawned fuscript process. */
+  /** Cooperative cancellation forwarded to the spawned MCP server process. */
   readonly signal?: AbortSignal
 }
 
+/**
+ * The davinci-mcp script tool a body targets: the sandboxed `run_script` (no
+ * imports) or the OS-capable `run_script_unsafe` (screenshot subprocesses).
+ */
+export type DavinciScriptTool = 'run_script' | 'run_script_unsafe'
+
 /** Fully-resolved execution spec produced by the provider's resolve step. */
 export interface DavinciSpec {
-  /** Absolute path of the Resolve `fuscript` host to spawn. */
-  readonly fuscriptPath: string
+  /** Absolute path of the davinci-mcp stdio JSON-RPC server entry (`index.js`). */
+  readonly mcpServerPath: string
+  /** Absolute path of the ResolveMCP binary, passed as `RESOLVE_MCP_PATH`. */
+  readonly resolveMcpPath: string
   /** Execution budget in milliseconds after clamping. */
   readonly timeoutMs: number
 }
 
 /**
  * Closed failure taxonomy shared by every operation result. Codes come from
- * the Lua prelude and operation bodies (`ERROR <code>: <message>` lines) plus
- * the provider's spawn/timeout mapping.
+ * the Python prelude and operation bodies (`ERROR <code>: <message>` lines)
+ * plus the provider's inner-response and transport mappings.
  */
 export type DavinciFailureCode =
   | 'resolve-unreachable'
@@ -284,4 +292,15 @@ export interface DavinciMarkerRequest {
   readonly note: string
   /** Marker duration in frames; undefined means the host default of 1. */
   readonly durationFrames: number | undefined
+}
+
+/** Screenshot request: capture the Resolve UI to a PNG under a workspace dir. */
+export interface DavinciScreenshotRequest {
+  /** Bring the Resolve `.app` to the front before the foreground check. */
+  readonly activate: boolean
+  /**
+   * Directory receiving the PNG, relative to the working directory; the
+   * caller resolves it against the plugin config's `screenshotDir`.
+   */
+  readonly screenshotDir: string
 }

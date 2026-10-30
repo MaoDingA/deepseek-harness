@@ -1,8 +1,8 @@
 /**
- * Pure fuscript stdout protocol: banner stripping, `ERROR <code>: <message>`
- * extraction, per-operation `key=value` projections, and timeout clamping.
- * Everything here is a function of strings and maps, so the contract is
- * unit-testable without a live Resolve.
+ * Pure script-output protocol: `run_script` inner-response mapping,
+ * `ERROR <code>: <message>` extraction, per-operation `key=value` projections,
+ * and timeout clamping/conversion. Everything here is a function of strings
+ * and maps, so the contract is unit-testable without a live Resolve.
  * @module @deepseek-ai/dsh-davinci/protocol
  */
 
@@ -29,12 +29,6 @@ import type {
   DavinciTimelineSwitchInfo,
 } from './types.ts'
 
-const BANNER_LINE_PREFIXES = [
-  'DaVinci Resolve Script Interpreter',
-  'Copyright (C)',
-  'Shell cwd was reset',
-] as const
-
 const FAILURE_CODES: readonly DavinciFailureCode[] = [
   'resolve-unreachable',
   'no-project',
@@ -57,18 +51,8 @@ export const MAX_LISTED_ITEMS = 200
 /** Lower clamp bound for every resolved execution budget. */
 export const MIN_TIMEOUT_MS = 1_000
 
-/**
- * Drop fuscript's banner lines and blank lines from captured stdout.
- * @param stdout - raw fuscript stdout.
- * @returns the remaining lines joined with newlines.
- */
-export function stripBanner(stdout: string): string {
-  return stdout
-    .split('\n')
-    .filter((line) =>
-      line !== '' && !BANNER_LINE_PREFIXES.some((prefix) => line.startsWith(prefix)))
-    .join('\n')
-}
+/** `run_script`'s own hard cap on the per-script `timeout` argument, in seconds. */
+export const RUN_SCRIPT_MAX_TIMEOUT_SECONDS = 60
 
 /** Parsed script output: either kv fields or a coded failure line. */
 export interface ParsedOutput {
@@ -79,14 +63,14 @@ export interface ParsedOutput {
 }
 
 /**
- * Parse stripped script output. A line `ERROR <code>: <message>` fails the
+ * Parse captured script output. A line `ERROR <code>: <message>` fails the
  * call with that code (unknown codes collapse to `api-failed`); every other
  * line is collected as `key=value`, splitting at the first `=`.
- * @param raw - banner-stripped fuscript stdout.
+ * @param raw - the `output` payload of a `run_script` response (captured prints).
  * @returns the parsed output with all kv fields.
  */
 export function parseOutput(raw: string): ParsedOutput {
-  const lines = stripBanner(raw).split('\n').filter((line) => line !== '')
+  const lines = raw.split('\n').filter((line) => line !== '')
   const fields = new Map<string, string>()
   for (const line of lines) {
     const eq = line.indexOf('=')
@@ -219,7 +203,7 @@ export function audioTimelineItemsFrom(fields: ReadonlyMap<string, string>): Dav
  * Project render-status fields: the live render-engine state. On Resolve 21+
  * the body also reports `preset_count` and `format_count`; on Resolve 20.x
  * those keys are absent (or zero) and the corresponding fields stay undefined.
- * A `read-failed` marker on any render-engine field (the Lua body emits one
+ * A `read-failed` marker on any render-engine field (the Python body emits one
  * when its pcall-protected host call errored) fails the whole projection: a
  * failed read must not masquerade as an empty queue or `is_rendering=false`.
  * @param fields - parsed kv fields from the render-status body.
@@ -235,7 +219,7 @@ export function renderStatusFrom(fields: ReadonlyMap<string, string>): DavinciRe
     return {
       ok: false,
       code: 'api-failed',
-      message: `render-status read failed (${failedReads.join(', ')}): the fuscript bridge could not `
+      message: `render-status read failed (${failedReads.join(', ')}): the scripting bridge could not `
         + 'read the render engine — the Resolve script listener may be wedged (a Resolve restart '
         + 'restores it). Refusing to report queue state from a failed read.',
     }
@@ -481,4 +465,56 @@ export function mutationFrom(fields: ReadonlyMap<string, string>, op: string): D
 export function clampTimeout(requested: number | undefined, defaultMs: number, maxMs: number): number {
   const value = requested ?? defaultMs
   return Math.min(Math.max(value, MIN_TIMEOUT_MS), Math.max(maxMs, MIN_TIMEOUT_MS))
+}
+
+/**
+ * Convert a clamped millisecond budget to the integer `timeout` seconds the
+ * `run_script` schema accepts: ceil so a partial second is never truncated
+ * away from the script, then clamped into the tool's 1..60 range.
+ * @param timeoutMs - clamped execution budget in milliseconds.
+ * @returns whole seconds for the `run_script` `timeout` argument.
+ */
+export function scriptTimeoutSeconds(timeoutMs: number): number {
+  return Math.min(Math.max(Math.ceil(timeoutMs / 1000), 1), RUN_SCRIPT_MAX_TIMEOUT_SECONDS)
+}
+
+/**
+ * Map the inner JSON text of a `run_script`/`run_script_unsafe` response to
+ * the raw kv output {@link parseOutput} consumes. `{"output": ...}` passes the
+ * captured prints through; an `error` payload becomes a synthesized
+ * `ERROR <code>: <message>` line — script timeouts keep the sandbox's verbatim
+ * text under the `timeout` code, every other script failure (traceback or
+ * SyntaxError) reports the exception's last line under `api-failed`.
+ * @param tool - tool name for the fail-loud non-JSON message.
+ * @param text - `content[0].text` of the MCP tool response.
+ * @returns raw kv lines for {@link parseOutput}.
+ * @throws when the text is not the inner JSON envelope (the wrapper's
+ *   `isError` path or a protocol drift); the caller classifies it as a
+ *   transport failure.
+ */
+export function innerResponseToRaw(tool: string, text: string): string {
+  let inner: unknown
+  try {
+    inner = JSON.parse(text)
+  } catch {
+    throw new Error(`davinci MCP ${tool} response was not inner JSON: ${text.slice(0, 200)}`)
+  }
+  const error = (inner as { error?: unknown }).error
+  if (typeof error === 'string') {
+    if (error.startsWith('Script timed out')) return `ERROR timeout: ${error}`
+    return `ERROR api-failed: ${lastExceptionLine(error)}`
+  }
+  const output = (inner as { output?: unknown }).output
+  return typeof output === 'string' ? output : ''
+}
+
+/**
+ * Keep only the final non-empty line of a Python failure report: the
+ * `Error: ...`/`SyntaxError: ...` sentence naming the cause.
+ * @param trace - the sandbox's full error string.
+ * @returns the last non-empty line, or the whole string when every line is blank.
+ */
+function lastExceptionLine(trace: string): string {
+  const lines = trace.split('\n').filter((line) => line.trim() !== '')
+  return lines[lines.length - 1] ?? trace
 }

@@ -31,7 +31,7 @@ describe('davinci-resolve composition', () => {
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
-    await ctx.plugin(Davinci, { fuscriptPath: '/nonexistent/fuscript' })
+    await ctx.plugin(Davinci, { mcpServerPath: '/nonexistent/server/index.js' })
     expect(ctx.get('davinci')).toBeDefined()
     for (const name of TOOL_NAMES) {
       expect(ctx.tools.get(name), name).toBeDefined()
