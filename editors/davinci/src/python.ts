@@ -432,11 +432,16 @@ record_frame = ${request.recordFrame}
 # exceeds every pre-existing start. Use strict > to distinguish it from any
 # same-named item already on the timeline at an earlier start.
 max_start = None
-for ti in range(1, int(t.GetTrackCount('video')) + 1):
-    for it in each(t.GetItemListInTrack('video', ti)):
-        start = it.GetStart()
-        if max_start is None or start > max_start:
-            max_start = start
+pre_tails = {}
+for kind in ('video', 'audio'):
+    for ti in range(1, int(t.GetTrackCount(kind)) + 1):
+        starts = []
+        for it in each(t.GetItemListInTrack(kind, ti)):
+            start = it.GetStart()
+            starts.append(start)
+            if kind == 'video' and (max_start is None or start > max_start):
+                max_start = start
+        pre_tails[(kind, ti)] = max(starts) if starts else None
 
 ok = pool.AppendToTimeline([target])
 if ok is None or ok is False:
@@ -470,7 +475,19 @@ print('landed_end=' + s(actual_end))
 if actual_track == track_index and actual_start == record_frame:
     print('done=true')
 else:
-    removed = t.DeleteClips([landed])
+    # AppendToTimeline lands the clip's companion audio alongside the video
+    # item, so the rollback must remove every post-append arrival on every
+    # track (anything beyond the pre-append tail), not just the video item;
+    # otherwise the audio remainder stretches the timeline past its baseline.
+    doomed = []
+    for kind in ('video', 'audio'):
+        for ti in range(1, int(t.GetTrackCount(kind)) + 1):
+            tail = pre_tails.get((kind, ti))
+            for it in each(t.GetItemListInTrack(kind, ti)):
+                st = it.GetStart()
+                if tail is None or st > tail:
+                    doomed.append(it)
+    removed = t.DeleteClips(doomed) if doomed else True
     print('rolled_back=' + s(removed is True))
     print('ERROR mislanded-placement: requested video track ' + s(track_index) + ' at record frame ' + s(record_frame) + "; Resolve 21's only positioned placement is tail-append, which landed on video track " + s(actual_track) + ' at record frame ' + s(actual_start) + ' (end ' + s(actual_end) + '). The item was rolled back via DeleteClips to leave the timeline unchanged. For a true positioned insert, use the Edit page (select + drag on the UI), or run a fuscript that drives the Resolve UI.')
 `
@@ -488,7 +505,7 @@ if t is None:
     return
 item = find_item_by_start(t, ${request.trackIndex}, ${request.startFrame})
 if item is None:
-    print('ERROR item-not-found: no item starts at frame ' + ${request.startFrame} + ' on video track ' + ${request.trackIndex})
+    print('ERROR item-not-found: no item starts at frame ' + str(${request.startFrame}) + ' on video track ' + str(${request.trackIndex}))
     return
 ok = t.DeleteClips([item])
 print('done=' + s(ok))

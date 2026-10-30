@@ -110,6 +110,28 @@ describe('render control Python body generation', () => {
   })
 })
 
+describe('place and delete body generation', () => {
+  it('rolls a mislanded placement back across every track, not just the video item', () => {
+    const body = placePython({ bin: 'VFX/20260702', clipName: 'shot_010.mov', trackIndex: 2, recordFrame: 500 })
+    // AppendToTimeline lands companion audio alongside the video item; the rollback
+    // collects every post-append arrival beyond the per-track pre-append tail.
+    expect(body).toContain("for kind in ('video', 'audio'):")
+    expect(body).toContain('pre_tails[(kind, ti)]')
+    expect(body).toContain('doomed.append(it)')
+    expect(body).toContain('t.DeleteClips(doomed)')
+    // The video-only rollback that left audio residue is gone.
+    expect(body).not.toContain('t.DeleteClips([landed])')
+  })
+
+  it('stringifies numeric coordinates in the delete miss message', () => {
+    const body = deleteItemPython({ trackIndex: 1, startFrame: 12345 })
+    // Bare int concatenation raised TypeError on the miss path instead of
+    // printing the ERROR line the protocol layer parses.
+    expect(body).toContain('+ str(12345) + ')
+    expect(body).toContain('+ str(1))')
+  })
+})
+
 describe('renderStatusPython fail-loud reads', () => {
   it('marks guarded render-engine reads as read-failed instead of zero', () => {
     const body = renderStatusPython()
