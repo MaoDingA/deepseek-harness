@@ -918,6 +918,44 @@ describe('agent loop', () => {
     }
   })
 
+  it('records a carried pre-step reject reason as the durable turn ending', async () => {
+    // The variant is an arbitrary stand-in for a plugin-merged TurnEndReason;
+    // the contract under test is verbatim pass-through into turn/end.
+    const adapter = new MockAdapter([])
+    const ctx = await harness(adapter)
+    try {
+      const agent = await ctx.agentLoop.create(SessionId('pre-step-reject-reason'), { provider: 'mock', model: 'mock' })
+      ctx.on('agent/pre-step', async () => ({ kind: 'reject' as const, reason: { kind: 'max-tokens' as const } }))
+      send(agent, 'gated')
+      await agent.whenIdle()
+      expect(adapter.requests).toHaveLength(0)
+      expect(agent.session.snapshotEvents().filter(event => event.type === 'step/start')).toHaveLength(0)
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { turn: 1, reason: { kind: 'max-tokens' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the historical blocked turn ending for a bare pre-step reject', async () => {
+    const adapter = new MockAdapter([])
+    const ctx = await harness(adapter)
+    try {
+      const agent = await ctx.agentLoop.create(SessionId('pre-step-reject-bare'), { provider: 'mock', model: 'mock' })
+      ctx.on('agent/pre-step', async () => ({ kind: 'reject' as const }))
+      send(agent, 'gated')
+      await agent.whenIdle()
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { turn: 1, reason: { kind: 'blocked' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('clears compacted runtime context after the active set becomes empty', async () => {
     const adapter = new MockAdapter([textResponse('one'), textResponse('two')])
     const ctx = await harness(adapter)

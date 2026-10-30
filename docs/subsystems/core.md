@@ -313,12 +313,20 @@ Source: [`packages/core/agent/src/types.ts`](../../packages/core/agent/src/types
 
 `agent/pre-step` receives one payload carrying the exclusive claimed batch (`messages`), the proposed step's coordinates (`turn`, `step`), and the current turn's cancellation `signal`. The initial proposal runs inside an open turn before any step; a tool continuation may submit an empty claimed batch between steps:
 
-It returns a `PreStepDecision`. Reject opens no step. Enter supplies the complete message batch appended after `step/start`; claimed messages omitted by the final decision remain removed, while input inserted after the claim stays pending:
+It returns a `PreStepDecision`. Reject opens no step; a reject carrying `reason` records that `TurnEndReason` verbatim as the turn's `turn/end` outcome, while a bare reject keeps the historical `blocked` ending. Enter supplies the complete message batch appended after `step/start`; claimed messages omitted by the final decision remain removed, while input inserted after the claim stays pending:
 
 ```ts type-equiv
 /** Whether and with which messages the loop enters a proposed step. */
 type PreStepDecision =
-  | { kind: 'reject' }
+  | {
+    kind: 'reject'
+    /**
+     * Why the rejected step's turn ends; the durable `turn/end` records this
+     * reason verbatim instead of the historical `blocked` outcome. Absent
+     * keeps `blocked`, so existing bare rejections are unchanged.
+     */
+    reason?: TurnEndReason
+  }
   | {
     kind: 'enter'
     messages: UserMessage[]

@@ -10,7 +10,9 @@ import type { Scoped } from '@deepseek-ai/dsh-scope'
 import type {
   LlmAttemptId, LlmCallConfig, LlmFailure, MessageId, ReasoningEffortId, ResolvedRetryPolicy, StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import type { AgentCancelCause, Session, SessionSeq, UserMessage } from '@deepseek-ai/dsh-session'
+import type {
+  AgentCancelCause, Session, SessionSeq, TurnEndReason, UserMessage,
+} from '@deepseek-ai/dsh-session'
 export type { AgentCancelCause } from '@deepseek-ai/dsh-session'
 import type { Agent, InboxTarget } from './types.ts'
 export type { Agent } from './types.ts'
@@ -110,7 +112,15 @@ export type AgentStatus = 'idle' | 'running'
 
 /** Whether and with which messages the loop enters a proposed step. */
 export type PreStepDecision =
-  | { kind: 'reject' }
+  | {
+    kind: 'reject'
+    /**
+     * Why the rejected step's turn ends; the durable `turn/end` records this
+     * reason verbatim instead of the historical `blocked` outcome. Absent
+     * keeps `blocked`, so existing bare rejections are unchanged.
+     */
+    reason?: TurnEndReason
+  }
   | {
     kind: 'enter'
     messages: UserMessage[]
@@ -308,7 +318,9 @@ declare module '@deepseek-ai/cordis' {
     // ---- the machine's extension points ----
     /**
      * Reject a proposed step or replace the messages that enter it. Calling
-     * `next()` preserves the current messages.
+     * `next()` preserves the current messages. A reject may carry `reason` to
+     * name the durable `turn/end` outcome; a bare reject ends the turn as
+     * `blocked`.
      * @param payload.agent - the agent proposing the step.
      * @param payload.messages - messages removed from the inbox for this step.
      * @param payload.turn - the turn that will own the step.

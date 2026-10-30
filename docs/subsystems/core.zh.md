@@ -321,12 +321,20 @@ pre-step 决策使用与持久 user-role 输入相同、带标识的 `UserMessag
 
 `agent/pre-step` 接收一个 payload，携带独占的已领取批次（`messages`）、拟进入步骤的坐标（`turn`、`step`）与当前轮次的取消 `signal`。首次提案在已打开的轮次内、任何步骤开始前运行；工具 continuation 可以在步骤之间提交空的已领取批次：
 
-它返回 `PreStepDecision`。reject 不会打开步骤。enter 提供在 `step/start` 后追加的完整消息批次；最终决策省略的已领取消息保持已删除，而领取后插入的输入仍留待后续处理：
+它返回 `PreStepDecision`。reject 不会打开步骤；携带 `reason` 的 reject 会把该 `TurnEndReason` 原样记录为该轮次 `turn/end` 的终止原因，裸 reject 则保持历史上的 `blocked` 终止。enter 提供在 `step/start` 后追加的完整消息批次；最终决策省略的已领取消息保持已删除，而领取后插入的输入仍留待后续处理：
 
 ```ts type-equiv
 /** Whether and with which messages the loop enters a proposed step. */
 type PreStepDecision =
-  | { kind: 'reject' }
+  | {
+    kind: 'reject'
+    /**
+     * Why the rejected step's turn ends; the durable `turn/end` records this
+     * reason verbatim instead of the historical `blocked` outcome. Absent
+     * keeps `blocked`, so existing bare rejections are unchanged.
+     */
+    reason?: TurnEndReason
+  }
   | {
     kind: 'enter'
     messages: UserMessage[]

@@ -431,6 +431,27 @@ export type Config = LocalConfig
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-bash-sandbox -->
 
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-budget-guard -->
+<a id="deepseek-aidsh-budget-guard"></a>
+
+## `@deepseek-ai/dsh-budget-guard`
+
+- `inject`: `llm`
+- `source`: [`packages/guard/budget-guard/src/index.ts:40`](../packages/guard/budget-guard/src/index.ts)
+
+```ts config-catalog
+/**
+ * Plugin config. `maxOutputTokens` must be a positive safe integer; a missing,
+ * zero, or fractional value fails plugin load in `apply` (misconfiguration
+ * fails loud).
+ */
+export interface Config {
+  /** Total output tokens this session's model calls may generate. */
+  maxOutputTokens?: number
+}
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-budget-guard -->
+
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-client-connection -->
 <a id="deepseek-aidsh-client-connection"></a>
 

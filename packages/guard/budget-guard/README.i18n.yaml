@@ -1,0 +1,64 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write packages/guard/budget-guard/README.md
+/:
+  en: b3598fefb18284fb
+  zh: 2ce36744dade1629
+/deepseek-ai-dsh-budget-guard:
+  en: eb569653290408ee
+  zh: 325d6e224e68cc30
+/deepseek-ai-dsh-budget-guard/summary:
+  en: f7833c99d3190225
+  zh: 6d5635d5449472c9
+/deepseek-ai-dsh-budget-guard/table-of-contents:
+  en: d152484eb41ac6b4
+  zh: 09388d293f9be9cb
+/deepseek-ai-dsh-budget-guard/use-this-package:
+  en: c00bf583125a35ec
+  zh: a2b95bfd6035d186
+/deepseek-ai-dsh-budget-guard/use-this-package/when-to-choose-it:
+  en: de4ffcc7b168d7df
+  zh: 59685f3944be78c9
+/deepseek-ai-dsh-budget-guard/use-this-package/what-you-get:
+  en: 4f21d1d214f7d8d7
+  zh: 97b2a9c6c46ea17f
+/deepseek-ai-dsh-budget-guard/understand-the-implementation:
+  en: f5cecf669e7f30b8
+  zh: 7631e1a37fec0c2b
+/deepseek-ai-dsh-budget-guard/understand-the-implementation/spending-is-read-from-the-durable-log:
+  en: 82d556eb5723f32a
+  zh: 0c79d354e0baab93
+/deepseek-ai-dsh-budget-guard/understand-the-implementation/clamping-and-the-adapter-default:
+  en: 803da778631100b5
+  zh: beb7094c74765f93
+/deepseek-ai-dsh-budget-guard/understand-the-implementation/termination-with-a-named-reason:
+  en: 1863f2c7aea208be
+  zh: a5dccd949591b8da
+/deepseek-ai-dsh-budget-guard/understand-the-implementation/source-map:
+  en: e26aa71eb72e1675
+  zh: 5e30dd44e1f9e908
+/deepseek-ai-dsh-budget-guard/further-exploration:
+  en: 135757b16ef3bd4c
+  zh: 1bf42b13d6cda748
+/deepseek-ai-dsh-budget-guard/model-experience:
+  en: 215e7ba838619b7b
+  zh: a311da3843709f90
+/deepseek-ai-dsh-budget-guard/model-experience/conditional-request-ceiling:
+  en: c9cc6c547876d7a4
+  zh: 866157154cfed7c9
+/deepseek-ai-dsh-budget-guard/model-experience/conditional-request-ceiling/what-the-model-sees:
+  en: 07852dbb0bd7fddc
+  zh: 17e24a8f9b302420
+/deepseek-ai-dsh-budget-guard/model-experience/conditional-request-ceiling/token-effect:
+  en: 7ac4a494f7ded5e1
+  zh: ff32fdaa3bae465b
+/deepseek-ai-dsh-budget-guard/model-experience/conditional-request-ceiling/kv-cache-effect:
+  en: 94dfba929b0b2e5a
+  zh: f7b93c188fd2b526
+/deepseek-ai-dsh-budget-guard/known-limitations-and-deferred-work:
+  en: 74e0cd1a042a3f37
+  zh: 39d501a46c495eed
+/deepseek-ai-dsh-budget-guard/known-limitations-and-deferred-work/dev-note:
+  en: e67f633dc6fe7773
+  zh: 3bb0c20c93f16f98
