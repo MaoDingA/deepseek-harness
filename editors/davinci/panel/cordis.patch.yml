@@ -1,0 +1,3 @@
+- insert:
+    - id: davinci-panel
+      name: '@local/dsh-davinci-panel'
