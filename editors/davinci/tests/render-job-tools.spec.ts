@@ -20,4 +20,10 @@ describe('addRenderJobText id source marker', () => {
     const info: DavinciRenderJobInfo = { jobCount: 1, firstJobName: undefined, jobId: undefined, idSource: 'returned' }
     expect(addRenderJobText(info)).not.toContain('job_id=')
   })
+
+  it('omits the queue depth when the post-enqueue read failed', () => {
+    const info: DavinciRenderJobInfo = { jobCount: undefined, firstJobName: undefined, jobId: 'job-1', idSource: 'returned' }
+    expect(addRenderJobText(info)).not.toContain('queued_jobs=')
+    expect(addRenderJobText(info)).toContain('job_id=job-1')
+  })
 })

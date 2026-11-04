@@ -5,11 +5,13 @@
  * (zero-import bodies only) and only `os`/`subprocess`/`time` are exercised in
  * the unsafe screenshot body. Bodies embed caller arguments with
  * `JSON.stringify`, whose output is a valid Python string literal, so no manual
- * escaping exists to get wrong. Output discipline is byte-identical to the
- * retired fuscript Lua bodies: `key=value` lines, `nil` for absent values
- * (the `s` helper reproduces Lua `tostring`, including `%.14g` float
- * rendering), and `ERROR <code>: <message>` for refusals; every early return
- * leaves the script otherwise silent.
+ * escaping exists to get wrong. Output discipline matches the retired fuscript
+ * Lua bodies: `key=value` lines with an absent value printed empty (the `s`
+ * helper keeps `true`/`false` literals and `%.14g` float rendering), and
+ * `ERROR <code>: <message>` for refusals; every early return leaves the script
+ * otherwise silent. Frame math uses the timeline's nominal integer rate with
+ * drop-frame handling for 29.97/59.94, and an unreadable frame rate fails the
+ * call instead of being guessed.
  * @module @deepseek-ai/dsh-davinci/python
  */
 
@@ -31,10 +33,10 @@ import type {
  * pass and can early-`return` exactly like the Lua bodies did.
  */
 export const PYTHON_PRELUDE = `def s(v):
-    # Lua tostring parity: nil/true/false literals and %.14g float rendering,
-    # because the kv protocol and its TypeScript parser read those literals.
+    # Lua tostring parity for the kv protocol: booleans and %.14g floats. An
+    # absent value prints empty, so a literal 'nil' stays a real string.
     if v is None:
-        return 'nil'
+        return ''
     if v is True:
         return 'true'
     if v is False:
@@ -55,15 +57,60 @@ def each(t):
         return list(t)
     return [t]
 
+def nominal_rate(fps):
+    # Timecode fields count in whole frames: 23.976 displays on a 24 grid and
+    # 29.97 on a 30 grid.
+    return int(round(fps))
+
 def tc_to_frames(tc, fps):
-    parts = tc.split(':')
+    # Timecode -> absolute frame number. ';' marks drop-frame timecode, which
+    # only 29.97/59.94 use; other rates read as non-drop.
+    if tc is None or fps is None:
+        return None
+    text = str(tc).strip()
+    drop = ';' in text
+    parts = text.replace(';', ':').split(':')
     if len(parts) != 4:
         return None
     for part in parts:
         if not (part.isascii() and part.isdigit()):
             return None
     h, m, sec, f = (int(part) for part in parts)
-    return int((((h * 60 + m) * 60 + sec) * fps + f) + 0.5)
+    nominal = nominal_rate(fps)
+    if nominal <= 0 or f >= nominal:
+        return None
+    if drop and nominal in (30, 60):
+        drop_frames = 2 if nominal == 30 else 4
+        total_minutes = h * 60 + m
+        return ((h * 3600 + m * 60 + sec) * nominal + f) - drop_frames * (total_minutes - total_minutes // 10)
+    return ((h * 60 + m) * 60 + sec) * nominal + f
+
+def frames_to_tc(frames, fps):
+    # Absolute frame number -> timecode. Drop-frame applies the standard
+    # per-minute adjustment so 29.97/59.94 output matches Resolve's ';' timecode.
+    if frames is None or fps is None or frames < 0:
+        return None
+    nominal = nominal_rate(fps)
+    if nominal <= 0:
+        return None
+    drop = abs(fps - nominal) > 0.01 and nominal in (30, 60)
+    adjusted = frames
+    if drop:
+        drop_frames = 2 if nominal == 30 else 4
+        per_10_minutes = nominal * 600 - drop_frames * 9
+        per_minute = nominal * 60 - drop_frames
+        tens, rest = divmod(frames, per_10_minutes)
+        adjusted = frames + drop_frames * 9 * tens
+        if rest > drop_frames:
+            adjusted = adjusted + drop_frames * ((rest - drop_frames) // per_minute)
+    ff = adjusted % nominal
+    total_seconds = adjusted // nominal
+    ss = total_seconds % 60
+    total_minutes = total_seconds // 60
+    mm = total_minutes % 60
+    hh = total_minutes // 60
+    separator = ';' if drop else ':'
+    return '%02d:%02d:%02d' % (hh, mm, ss) + separator + '%02d' % ff
 
 def _dsh_main():
     if resolve is None:
@@ -103,10 +150,22 @@ def _dsh_main():
         return None
 
     def timeline_fps():
+        # A missing or unparsable timelineFrameRate fails the frame math that
+        # depends on it; it is never guessed.
         try:
-            return float(project.GetSetting('timelineFrameRate'))
-        except (TypeError, ValueError):
-            return 25.0
+            raw = project.GetSetting('timelineFrameRate')
+        except Exception:
+            return None
+        if raw is None:
+            return None
+        token = str(raw).strip().split()
+        if not token:
+            return None
+        try:
+            fps = float(token[0])
+        except ValueError:
+            return None
+        return fps if fps > 0 else None
 
     def render_job_id(row):
         # Queued render-job id across host row shapes: dict rows carry JobId
@@ -177,15 +236,17 @@ for sf in each(folder.GetSubFolders()):
     n = 0
     for _c in each(sf.GetClipList()):
         n = n + 1
-    print('bin_' + str(bins) + '_name=' + s(sf.GetName()))
-    print('bin_' + str(bins) + '_clips=' + str(n))
+    if bins <= ${MAX_LISTED_ITEMS}:
+        print('bin_' + str(bins) + '_name=' + s(sf.GetName()))
+        print('bin_' + str(bins) + '_clips=' + str(n))
 for c in each(folder.GetClipList()):
     clips = clips + 1
-    print('clip_' + str(clips) + '_name=' + s(c.GetName()))
-    print('clip_' + str(clips) + '_tc=' + s(c.GetClipProperty('Start TC')))
-    print('clip_' + str(clips) + '_duration=' + s(c.GetClipProperty('Duration')))
-    print('clip_' + str(clips) + '_fps=' + s(c.GetClipProperty('FPS')))
-    print('clip_' + str(clips) + '_path=' + s(c.GetClipProperty('File Path')))
+    if clips <= ${MAX_LISTED_ITEMS}:
+        print('clip_' + str(clips) + '_name=' + s(c.GetName()))
+        print('clip_' + str(clips) + '_tc=' + s(c.GetClipProperty('Start TC')))
+        print('clip_' + str(clips) + '_duration=' + s(c.GetClipProperty('Duration')))
+        print('clip_' + str(clips) + '_fps=' + s(c.GetClipProperty('FPS')))
+        print('clip_' + str(clips) + '_path=' + s(c.GetClipProperty('File Path')))
 print('bin_count=' + str(bins))
 print('clip_count=' + str(clips))
 `
@@ -241,6 +302,9 @@ t = current_timeline()
 if t is None:
     return
 fps = timeline_fps()
+if fps is None:
+    print('ERROR api-failed: could not read timelineFrameRate; source-TC matching needs the timeline frame rate')
+    return
 target = tc_to_frames(${JSON.stringify(tc)}, fps)
 if target is None:
     print('ERROR bad-tc: expected HH:MM:SS:FF, got ' + ${JSON.stringify(tc)})
@@ -296,11 +360,12 @@ for i in range(1, count + 1):
                 nm = s(it.GetName())
                 if needle in nm:
                     hits = hits + 1
-                    print('hit_' + str(hits) + '_timeline=' + tl_name)
-                    print('hit_' + str(hits) + '_track=' + str(ti))
-                    print('hit_' + str(hits) + '_name=' + nm)
-                    print('hit_' + str(hits) + '_start=' + s(it.GetStart()))
-                    print('hit_' + str(hits) + '_end=' + s(it.GetEnd()))
+                    if hits <= ${MAX_LISTED_ITEMS}:
+                        print('hit_' + str(hits) + '_timeline=' + tl_name)
+                        print('hit_' + str(hits) + '_track=' + str(ti))
+                        print('hit_' + str(hits) + '_name=' + nm)
+                        print('hit_' + str(hits) + '_start=' + s(it.GetStart()))
+                        print('hit_' + str(hits) + '_end=' + s(it.GetEnd()))
 print('scanned=' + str(scanned))
 print('hits=' + str(hits))
 `
@@ -314,16 +379,25 @@ print('hits=' + str(hits))
  */
 export function seekPython(frame: number | undefined, tc: string | undefined): string {
   const tcLiteral = tc !== undefined ? JSON.stringify(tc) : 'None'
-  const frameLiteral = frame ?? 0
+  const frameLiteral = frame === undefined ? 'None' : frame
   return `
 t = current_timeline()
 if t is None:
     return
-fps = timeline_fps()
 tc_str = ${tcLiteral}
 if tc_str is None:
     f = ${frameLiteral}
-    tc_str = '%02d:%02d:%02d:%02d' % (int(f // (3600 * fps)), int(f // (60 * fps)) % 60, int(f // fps) % 60, int(f % fps))
+    if f is None:
+        print('ERROR api-failed: resolve_seek needs a frame or a timecode')
+        return
+    fps = timeline_fps()
+    if fps is None:
+        print('ERROR api-failed: could not read timelineFrameRate to convert record frame ' + s(f) + ' to a timecode')
+        return
+    tc_str = frames_to_tc(int(f), fps)
+    if tc_str is None:
+        print('ERROR bad-tc: record frame ' + s(f) + ' is outside the printable timecode range')
+        return
 ok = t.SetCurrentTimecode(tc_str)
 print('seek_ok=' + s(ok))
 print('now_at=' + s(t.GetCurrentTimecode()))
@@ -382,29 +456,31 @@ print('timeline_index=' + s(target_index))
 }
 
 /**
- * Body placing a bin clip onto a video track at a record frame with
- * overwrite semantics. Resolve 21.1.1.10's scripting surface exposes only
- * `MediaPool:AppendToTimeline` for clip placement; the documented
- * `InsertToTimeline` / `ReplaceToTimeline` are ABSENT, and the options dict
- * (`timeline`, `trackType`, `trackIndex`, `recordFrame`, `insertType`) is
- * empirically IGNORED — repeated experiments show a single append always
- * lands on the V1 timeline tail regardless of `trackIndex` or `recordFrame`.
- * Resolve's scripting surface has no positioned-insert, no `MoveItemsInTrack`,
- * no clip-reposition primitive, and no Track-object API.
+ * Body placing a bin clip onto a video track at a record frame. Resolve
+ * 21.1.1.10's scripting surface exposes only `MediaPool:AppendToTimeline` for
+ * clip placement; the documented `InsertToTimeline` / `ReplaceToTimeline` are
+ * ABSENT, and the options dict (`timeline`, `trackType`, `trackIndex`,
+ * `recordFrame`, `insertType`) is empirically IGNORED — repeated experiments
+ * show a single append always lands on the V1 timeline tail regardless of
+ * `trackIndex` or `recordFrame`. Resolve's scripting surface has no
+ * positioned-insert, no `MoveItemsInTrack`, no clip-reposition primitive, and
+ * no Track-object API.
  *
- * This body therefore implements the requested semantics by:
- *   1. capturing the current max-start across all video tracks (append
- *      extends the tail, so the new item's start exceeds every pre-existing),
- *   2. appending via the only available primitive (`AppendToTimeline`),
- *   3. reading back the newly-appended item's actual track/start/end,
- *   4. succeeding only when actual == requested, otherwise rolling back the
- *      landed item via `DeleteClips` and failing loudly with the real
- *      coordinates so the caller and user see exactly what happened.
+ * This body therefore appends, reads the landing back, and compares it with
+ * the request:
+ *   1. snapshot every existing item (track, position, name) and the video
+ *      max-start before the call,
+ *   2. append via the only available primitive (`AppendToTimeline`),
+ *   3. read back the newly-appended item's actual track/start/end,
+ *   4. succeed only when actual == requested; otherwise remove exactly the
+ *      items that arrived during the call (on every track) via `DeleteClips`,
+ *      and fail loudly with the real coordinates.
  *
+ * A response that claims success without a findable new item also rolls back
+ * every arrival before failing, so a failed call never leaves a stray clip.
  * `done=true` is printed only on an exact placement, so
  * `mutationFrom(fields, op)`'s `done==true` gate keeps its "only true on
- * success" contract; a mislanded placement leaves the timeline unchanged
- * after rollback.
+ * success" contract.
  * @param request - the placement coordinates (bin/clip + video track + record frame).
  * @returns Python source for {@link pythonScriptOf}.
  */
@@ -428,20 +504,31 @@ if target is None:
 track_index = ${request.trackIndex}
 record_frame = ${request.recordFrame}
 
-# AppendToTimeline always extends the tail, so the appended item's start strictly
-# exceeds every pre-existing start. Use strict > to distinguish it from any
-# same-named item already on the timeline at an earlier start.
+# Snapshot every item before the append: the rollback then removes exactly the
+# arrivals (any track, any position), so even a future host that honors
+# trackIndex/recordFrame cannot leave a mislanded clip behind.
+pre_items = {}
 max_start = None
-pre_tails = {}
 for kind in ('video', 'audio'):
     for ti in range(1, int(t.GetTrackCount(kind)) + 1):
-        starts = []
         for it in each(t.GetItemListInTrack(kind, ti)):
             start = it.GetStart()
-            starts.append(start)
+            key = (kind, ti, start, it.GetEnd(), s(it.GetName()))
+            pre_items[key] = pre_items.get(key, 0) + 1
             if kind == 'video' and (max_start is None or start > max_start):
                 max_start = start
-        pre_tails[(kind, ti)] = max(starts) if starts else None
+
+def rollback_appended():
+    doomed = []
+    for kind in ('video', 'audio'):
+        for ti in range(1, int(t.GetTrackCount(kind)) + 1):
+            for it in each(t.GetItemListInTrack(kind, ti)):
+                key = (kind, ti, it.GetStart(), it.GetEnd(), s(it.GetName()))
+                if pre_items.get(key, 0) > 0:
+                    pre_items[key] = pre_items[key] - 1
+                else:
+                    doomed.append(it)
+    return t.DeleteClips(doomed) if doomed else True
 
 ok = pool.AppendToTimeline([target])
 if ok is None or ok is False:
@@ -461,7 +548,9 @@ for ti in range(1, int(t.GetTrackCount('video')) + 1):
                 landed_track = ti
 
 if landed is None:
-    print('ERROR api-failed: AppendToTimeline reported success but no item named ' + ${JSON.stringify(request.clipName)} + ' was found beyond frame ' + s(max_start) + ' on any video track')
+    removed = rollback_appended()
+    print('rolled_back=' + s(removed is True))
+    print('ERROR api-failed: AppendToTimeline reported success but no item named ' + ${JSON.stringify(request.clipName)} + ' was found beyond frame ' + s(max_start) + ' on any video track; every item added by the call was rolled back')
     return
 
 actual_track = landed_track
@@ -476,18 +565,9 @@ if actual_track == track_index and actual_start == record_frame:
     print('done=true')
 else:
     # AppendToTimeline lands the clip's companion audio alongside the video
-    # item, so the rollback must remove every post-append arrival on every
-    # track (anything beyond the pre-append tail), not just the video item;
-    # otherwise the audio remainder stretches the timeline past its baseline.
-    doomed = []
-    for kind in ('video', 'audio'):
-        for ti in range(1, int(t.GetTrackCount(kind)) + 1):
-            tail = pre_tails.get((kind, ti))
-            for it in each(t.GetItemListInTrack(kind, ti)):
-                st = it.GetStart()
-                if tail is None or st > tail:
-                    doomed.append(it)
-    removed = t.DeleteClips(doomed) if doomed else True
+    # item, so the rollback removes every arrival on every track, not just the
+    # video item; otherwise the audio remainder stretches the timeline.
+    removed = rollback_appended()
     print('rolled_back=' + s(removed is True))
     print('ERROR mislanded-placement: requested video track ' + s(track_index) + ' at record frame ' + s(record_frame) + "; Resolve 21's only positioned placement is tail-append, which landed on video track " + s(actual_track) + ' at record frame ' + s(actual_start) + ' (end ' + s(actual_end) + '). The item was rolled back via DeleteClips to leave the timeline unchanged. For a true positioned insert, use the Edit page (select + drag on the UI), or run a fuscript that drives the Resolve UI.')
 `
@@ -644,7 +724,7 @@ try:
     fmt = project.GetCurrentRenderFormatAndCodec()
 except Exception:
     ok_fmt = False
-fmt_name = 'nil'
+fmt_name = ''
 if ok_fmt and fmt is not None:
     nm = None
     if isinstance(fmt, dict):
@@ -656,26 +736,29 @@ if ok_fmt and fmt is not None:
     if nm is not None and nm is not False:
         fmt_name = s(nm)
 print('current_format=' + fmt_name)
-try:
-    raw = project.GetRenderCodecs(fmt_name)
-    codecs = each(raw)
-    nm = None
-    if codecs:
-        first = codecs[0]
-        if isinstance(first, dict):
-            nm = first.get('Name')
-            if nm is None:
-                nm = first.get('name')
-        elif not isinstance(first, str):
-            nm = getattr(first, 'Name', None)
-            if nm is None:
-                nm = getattr(first, 'name', None)
-    if nm is not None and nm is not False:
-        print('current_codec=' + s(nm))
-    else:
-        print('current_codec=nil')
-except Exception:
-    print('current_codec=nil')
+if fmt_name == '':
+    print('current_codec=')
+else:
+    try:
+        raw = project.GetRenderCodecs(fmt_name)
+        codecs = each(raw)
+        nm = None
+        if codecs:
+            first = codecs[0]
+            if isinstance(first, dict):
+                nm = first.get('Name')
+                if nm is None:
+                    nm = first.get('name')
+            elif not isinstance(first, str):
+                nm = getattr(first, 'Name', None)
+                if nm is None:
+                    nm = getattr(first, 'name', None)
+        if nm is not None and nm is not False:
+            print('current_codec=' + s(nm))
+        else:
+            print('current_codec=')
+    except Exception:
+        print('current_codec=')
 has_load = callable(getattr(project, 'LoadRenderPreset', None))
 has_get_presets = callable(getattr(project, 'GetRenderPresets', None))
 has_get_formats = callable(getattr(project, 'GetRenderFormats', None))
@@ -845,7 +928,7 @@ if candidate == '':
     print('ERROR api-failed: AddRenderJob returned no id twice and the queue never grew; nothing was queued')
     return
 
-job_name = s(t.GetName())
+job_name = None
 job_count = None
 try:
     rows = project.GetRenderJobList()
@@ -858,24 +941,26 @@ if rows is not None:
             nm = render_job_name(row)
             if nm is not None:
                 job_name = nm
-                break
+            break
 print('ok=true')
 print('job_id=' + s(candidate))
 print('id_source=' + source)
 if job_count is not None:
     print('job_count=' + str(job_count))
-print('first_job_name=' + job_name)
+if job_name is not None:
+    print('first_job_name=' + job_name)
 `
 }
 
 /**
  * Body loading a render preset by exact name via `Project:LoadRenderPreset`.
- * The row-1 name read-back is the success signal: `Resolve` leaves the
- * previously active preset untouched on failure, so comparing the pre/post
- * `GetRenderPresets()[1]` value is a safe cross-version success check.
+ * The name is validated against the host's `GetRenderPresets` list first, so a
+ * typo refuses as `preset-not-found` without touching the host. The host's
+ * return is the success signal: a falsy return (False/None) is an `api-failed`
+ * refusal; `done=true` prints only after a truthy return.
  * @param request - the preset name to load (must match a host-reported entry).
- * @returns Python source for {@link pythonScriptOf}, printing `done=true|false`
- *   and a `loaded_preset` read-back.
+ * @returns Python source for {@link pythonScriptOf}, printing `done=true` and
+ *   the host-confirmed preset name.
  */
 export function loadRenderPresetPython(request: DavinciLoadRenderPresetRequest): string {
   return `
@@ -887,21 +972,39 @@ has_load = callable(getattr(project, 'LoadRenderPreset', None))
 if not has_load:
     print('ERROR api-failed: this Resolve build lacks Project:LoadRenderPreset (Resolve 21+ only)')
     return
-ok = project.LoadRenderPreset(name)
-if ok is False:
-    print('ERROR preset-not-found: Resolve refused to load preset ' + name + ' (not in the preset list or not selectable)')
+try:
+    lst = project.GetRenderPresets()
+except Exception:
+    print('ERROR api-failed: GetRenderPresets failed, so the preset name cannot be validated; read resolve_render_presets and retry')
     return
-first = None
-lst = project.GetRenderPresets()
-rows = each(lst) if lst is not None else []
-if rows:
-    row = rows[0]
+names = []
+for row in each(lst) if lst is not None else []:
+    candidate = None
     if isinstance(row, str):
-        first = row
+        candidate = row
     elif isinstance(row, dict):
-        first = row.get('Name')
+        candidate = row.get('Name')
+        if candidate is None:
+            candidate = row.get('name')
+    else:
+        candidate = getattr(row, 'Name', None)
+        if candidate is None:
+            candidate = getattr(row, 'name', None)
+    if candidate is not None and candidate is not False:
+        names.append(s(candidate))
+if name not in names:
+    print('ERROR preset-not-found: ' + name + ' is not one of the ' + str(len(names)) + ' presets this Resolve build reports; read resolve_render_presets for the exact names')
+    return
+try:
+    ok = project.LoadRenderPreset(name)
+except Exception:
+    print('ERROR api-failed: LoadRenderPreset raised an exception; the active preset is unchanged or unknown - read resolve_render_presets before retrying')
+    return
+if not ok:
+    print('ERROR api-failed: Resolve did not confirm the preset load (returned ' + s(ok) + '); the active preset may be unchanged')
+    return
 print('done=true')
-print('loaded_preset=' + s(first))
+print('loaded_preset=' + name)
 `
 }
 

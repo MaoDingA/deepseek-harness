@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-davinci",
   "description": "DaVinci Resolve capability: davinci-mcp stdio service + local provider + model-facing resolve_* tools (combined in-tree editor plugin, source-launched)",
-  "version": "0.1.0-rc.5",
+  "version": "0.2.1-rc.2",
   "private": true,
   "type": "module",
   "license": "MIT",

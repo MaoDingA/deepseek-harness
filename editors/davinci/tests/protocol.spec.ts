@@ -80,13 +80,14 @@ describe('projections', () => {
     })
   })
 
-  it('projectInfoFrom treats nil and missing as absent', () => {
+  it('projectInfoFrom keeps a literal nil value and treats only empty/missing fields as absent', () => {
     const info = projectInfoFrom(fieldsOf([
       ['resolve_version', 'nil'],
-      ['project_name', 'Show'],
+      ['project_name', ''],
       ['timeline_count', '0'],
     ]))
-    expect(info.resolveVersion).toBe('')
+    expect(info.resolveVersion).toBe('nil')
+    expect(info.projectName).toBe('')
     expect(info.currentTimeline).toBeUndefined()
     expect(info.videoTracks).toBeUndefined()
   })
@@ -104,6 +105,8 @@ describe('projections', () => {
       ['clip_1_path', '/tmp/shot_010.mov'],
     ]))
     expect(info.bins).toEqual([{ name: 'VFX', clipCount: 2 }])
+    expect(info.binTotal).toBe(1)
+    expect(info.clipTotal).toBe(1)
     expect(info.clips).toEqual([{
       name: 'shot_010',
       startTc: '01:00:00:00',
@@ -111,6 +114,20 @@ describe('projections', () => {
       fps: '25',
       filePath: '/tmp/shot_010.mov',
     }])
+  })
+
+  it('mediaPoolFrom caps returned rows at MAX_LISTED_ITEMS but keeps the totals', () => {
+    const info = mediaPoolFrom(fieldsOf([
+      ['bin_count', '250'],
+      ['bin_1_name', 'VFX'],
+      ['bin_1_clips', '300'],
+      ['clip_count', '250'],
+      ['clip_1_name', 'shot_010'],
+    ]))
+    expect(info.bins).toHaveLength(200)
+    expect(info.binTotal).toBe(250)
+    expect(info.clips).toHaveLength(200)
+    expect(info.clipTotal).toBe(250)
   })
 
   it('timelineItemsFrom parses rows and caps the window at MAX_LISTED_ITEMS', () => {
@@ -180,6 +197,7 @@ describe('projections', () => {
       ['hit_1_end', '7764'],
     ]))
     expect(info.scanned).toBe(1500)
+    expect(info.hitTotal).toBe(1)
     expect(info.hits).toEqual([{
       timeline: 'EP04_20260129',
       trackIndex: 8,
@@ -187,6 +205,16 @@ describe('projections', () => {
       recordStart: 7700,
       recordEnd: 7764,
     }])
+  })
+
+  it('findClipFrom caps returned rows at MAX_LISTED_ITEMS but keeps the hit total', () => {
+    const info = findClipFrom(fieldsOf([
+      ['scanned', '1500'],
+      ['hits', '250'],
+      ['hit_1_name', 'a'],
+    ]))
+    expect(info.hitTotal).toBe(250)
+    expect(info.hits).toHaveLength(200)
   })
 
   it('seekFrom maps a refused move to an api-failed result', () => {
@@ -284,6 +312,10 @@ describe('projections', () => {
       ok: true,
       data: { jobCount: 1, firstJobName: undefined, jobId: undefined, idSource: 'returned' },
     })
+    expect(addRenderJobFrom(fieldsOf([['ok', 'true'], ['job_id', 'job-1']]))).toEqual({
+      ok: true,
+      data: { jobCount: undefined, firstJobName: undefined, jobId: 'job-1', idSource: 'returned' },
+    })
     expect(addRenderJobFrom(fieldsOf([['ok', 'false']]))).toMatchObject({ ok: false, code: 'api-failed' })
   })
 
@@ -345,9 +377,11 @@ describe('innerResponseToRaw', () => {
     expect(innerResponseToRaw('run_script', JSON.stringify({ output: 'a=1\nb=2\n' }))).toBe('a=1\nb=2\n')
   })
 
-  it('returns empty output when the payload carries no output field', () => {
-    expect(innerResponseToRaw('run_script', JSON.stringify({ result: 42 }))).toBe('')
-    expect(innerResponseToRaw('run_script', JSON.stringify({}))).toBe('')
+  it('fails loud when the payload carries neither output nor error', () => {
+    expect(() => innerResponseToRaw('run_script', JSON.stringify({ result: 42 })))
+      .toThrow(/carried neither output nor error/)
+    expect(() => innerResponseToRaw('run_script', JSON.stringify({})))
+      .toThrow(/carried neither output nor error/)
   })
 
   it('maps a sandbox timeout to the timeout code with the verbatim text', () => {

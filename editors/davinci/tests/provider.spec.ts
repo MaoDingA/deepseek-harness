@@ -130,6 +130,10 @@ rl.on('line', (line) => {
     inner = { output: 'ERROR ambiguous-job: 2 new jobs appeared while AddRenderJob returned no id; candidates: job-n1, job-n2. No id is reported, nothing further is enqueued, and nothing is deleted - read resolve_render_status and disambiguate.\\n' }
   } else if (mode === 'render-delete') {
     inner = { output: 'done=true\\njob_id=job-a\\njob_count_after=1\\n' }
+  } else if (mode === 'screenshot-front') {
+    inner = { output: 'frontmost=com.apple.Safari\\n' }
+  } else if (mode === 'screenshot-ok') {
+    inner = { output: 'frontmost=com.blackmagic-design.DaVinciResolve\\npath=/tmp/shot.png\\n' }
   } else {
     inner = { output: 'resolve_version=21.1.1.10\\nproject_name=probe\\ntimeline_count=1\\ntimeline_1=Main\\ncurrent_timeline=Main\\ncurrent_start=0\\ncurrent_end=2500\\nvideo_tracks=1\\naudio_tracks=2\\n' }
   }
@@ -249,6 +253,19 @@ describe('McpDavinci stdio exchange', () => {
       expect(result.message).toContain('was not inner JSON')
       expect(result.message).toContain('DaVinci Resolve Studio is not installed')
     }
+  })
+
+  it('returns a coded refusal when another app is frontmost instead of throwing', async () => {
+    process.env.FAKE_MODE = 'screenshot-front'
+    const result = await serviceWithFakeServer().screenshot({ activate: false, screenshotDir: '/tmp/dsh-shots' })
+    expect(result).toMatchObject({ ok: false, code: 'api-failed' })
+    if (!result.ok) expect(result.message).toContain('com.apple.Safari')
+  })
+
+  it('returns the captured PNG path on success', async () => {
+    process.env.FAKE_MODE = 'screenshot-ok'
+    const result = await serviceWithFakeServer().screenshot({ activate: false, screenshotDir: '/tmp/dsh-shots' })
+    expect(result).toEqual({ ok: true, data: { path: '/tmp/shot.png' } })
   })
 
   it('kills a hung exchange at the wall clock and reports timeout', { timeout: 20_000 }, async () => {

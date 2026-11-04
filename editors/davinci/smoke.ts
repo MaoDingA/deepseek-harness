@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import McpDavinci from './src/provider.ts'
 import type { DavinciScriptTool } from './src/types.ts'
@@ -33,9 +34,8 @@ console.log('== unsafe probe (os.path.exists through run_script_unsafe) ==')
 console.log(JSON.stringify(await service.raw('import os\nprint("exists=" + str(os.path.exists("/Applications")))\n', 'run_script_unsafe')))
 
 console.log('== screenshot probe (activate: false) ==')
-try {
-  console.log(await service.screenshot({ activate: false, screenshotDir: '.resolve-agent' }))
-} catch (error) {
-  console.log(`refused: ${(error as Error).message}`)
-}
+console.log(JSON.stringify(await service.screenshot({
+  activate: false,
+  screenshotDir: join(process.cwd(), '.resolve-agent'),
+})))
 process.exit(0)

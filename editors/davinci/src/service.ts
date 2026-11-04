@@ -69,6 +69,7 @@ import type {
   DavinciRenderPresetsInfo,
   DavinciRenderStatusInfo,
   DavinciResult,
+  DavinciScreenshotInfo,
   DavinciScreenshotRequest,
   DavinciScriptTool,
   DavinciSeekInfo,
@@ -391,20 +392,28 @@ export abstract class DavinciService extends Service {
   }
 
   /**
-   * Capture the screen to a fresh PNG under the configured screenshot
+   * Capture the screen to a fresh PNG under the given absolute screenshot
    * directory, activating Resolve first when asked to. The OS-capability chain
    * (`open`, `lsappinfo`, `screencapture`) runs inside one `run_script_unsafe`
    * exchange; the foreground refusal decision stays here so its message is
    * verbatim. Refuses unless DaVinci Resolve is the frontmost app — the
    * capture otherwise shows whatever covers it.
-   * @param request - activation flag and the screenshot directory.
+   *
+   * Like every other operation, failures resolve as coded results: a failed
+   * foreground check is `api-failed`, and transport problems keep their
+   * `timeout`/`spawn-failed` classification.
+   * @param request - activation flag and the absolute screenshot directory.
    * @param envelope - call envelope.
-   * @returns the absolute path of the written PNG.
-   * @throws when Resolve is not frontmost after any activation attempt, or the
-   *   unsafe exchange itself failed.
+   * @returns the absolute PNG path or a coded failure.
    */
-  async screenshot(request: DavinciScreenshotRequest, envelope: DavinciCallRequest = {}): Promise<string> {
-    const spec = this.resolve(envelope)
+  async screenshot(request: DavinciScreenshotRequest, envelope: DavinciCallRequest = {}): Promise<DavinciResult<DavinciScreenshotInfo>> {
+    let spec: DavinciSpec
+    try {
+      spec = this.resolve(envelope)
+    } catch (error) {
+      const failure = classifySpawnError(error)
+      return { ok: false, code: failure.code, message: failure.message }
+    }
     const dir = resolvePath(request.screenshotDir)
     const pngPath = join(dir, `screen-${randomUUID()}.png`)
     const script = screenshotPython({
@@ -413,23 +422,31 @@ export abstract class DavinciService extends Service {
       dir,
       pngPath,
     })
-    const raw = await this.evalScript(script, spec, envelope.signal, 'run_script_unsafe')
+    let raw: string
+    try {
+      raw = await this.evalScript(script, spec, envelope.signal, 'run_script_unsafe')
+    } catch (error) {
+      const failure = classifySpawnError(error)
+      return { ok: false, code: failure.code, message: failure.message }
+    }
     const parsed = parseOutput(raw)
     if (parsed.status === 'error') {
-      throw new Error(`screenshot failed: [${parsed.code}] ${parsed.message}`)
+      return { ok: false, code: parsed.code, message: parsed.message }
     }
     const front = parsed.fields.get('frontmost') ?? ''
     if (front !== RESOLVE_BUNDLE_ID) {
-      throw new Error(
-        `screenshot skipped: the frontmost app is ${front || 'unknown'}, not DaVinci Resolve — the capture would show the covering window. `
-        + 'Ask the user to bring Resolve to the front, or retry with activate: true.',
-      )
+      return {
+        ok: false,
+        code: 'api-failed',
+        message: `the frontmost app is ${front || 'unknown'}, not DaVinci Resolve — the capture would show the covering window. `
+          + 'Ask the user to bring Resolve to the front, or retry with activate: true.',
+      }
     }
     const captured = parsed.fields.get('path')
     if (captured === undefined || captured === '') {
-      throw new Error('screenshot failed: the capture script reported no file path')
+      return { ok: false, code: 'api-failed', message: 'the capture script reported no file path' }
     }
-    return captured
+    return { ok: true, data: { path: captured } }
   }
 }
 

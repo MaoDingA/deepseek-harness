@@ -29,12 +29,12 @@ import {
 import { addRenderJobFrom, deleteRenderJobFrom, parseOutput } from '../src/protocol.ts'
 
 describe('prelude value discipline', () => {
-  it('locks the Lua-tostring parity the kv parser reads (nil/true/false literals, %.14g floats)', () => {
+  it('locks the kv value rendering (empty for absent, true/false literals, %.14g floats)', () => {
     expect(PYTHON_PRELUDE).toContain(`def s(v):
-    # Lua tostring parity: nil/true/false literals and %.14g float rendering,
-    # because the kv protocol and its TypeScript parser read those literals.
+    # Lua tostring parity for the kv protocol: booleans and %.14g floats. An
+    # absent value prints empty, so a literal 'nil' stays a real string.
     if v is None:
-        return 'nil'
+        return ''
     if v is True:
         return 'true'
     if v is False:
@@ -111,15 +111,17 @@ describe('render control Python body generation', () => {
 })
 
 describe('place and delete body generation', () => {
-  it('rolls a mislanded placement back across every track, not just the video item', () => {
+  it('rolls every arriving item back, not just the video item', () => {
     const body = placePython({ bin: 'VFX/20260702', clipName: 'shot_010.mov', trackIndex: 2, recordFrame: 500 })
     // AppendToTimeline lands companion audio alongside the video item; the rollback
-    // collects every post-append arrival beyond the per-track pre-append tail.
+    // removes every item that was not in the pre-append snapshot.
     expect(body).toContain("for kind in ('video', 'audio'):")
-    expect(body).toContain('pre_tails[(kind, ti)]')
+    expect(body).toContain('pre_items[key] = pre_items.get(key, 0) + 1')
+    expect(body).toContain('if pre_items.get(key, 0) > 0:')
     expect(body).toContain('doomed.append(it)')
     expect(body).toContain('t.DeleteClips(doomed)')
-    // The video-only rollback that left audio residue is gone.
+    // A no-landing success also rolls back, and the video-only rollback is gone.
+    expect(body).toContain("if landed is None:")
     expect(body).not.toContain('t.DeleteClips([landed])')
   })
 
@@ -260,6 +262,40 @@ finally:
 print(buffer.getvalue(), end='')
 print('CALLS ' + json.dumps({'add_calls': project.add_calls, 'delete_calls': project.delete_calls}))
 `
+
+describe('timecode math', () => {
+  it.skipIf(!python3Available)('round-trips non-drop and drop-frame timecodes at the nominal rate', () => {
+    const script = `${PYTHON_PRELUDE}
+print('df_1800=' + str(frames_to_tc(1800, 29.97)))
+print('df_17982=' + str(frames_to_tc(17982, 29.97)))
+print('nd_90000=' + str(frames_to_tc(90000, 25)))
+print('df_inverse=' + str(tc_to_frames('00:01:00;02', 29.97)))
+print('df_ten_inverse=' + str(tc_to_frames('00:10:00;00', 29.97)))
+print('nd_inverse=' + str(tc_to_frames('01:00:00:00', 25)))
+print('bad_tc=' + str(tc_to_frames('bad', 25)))
+print('negative=' + str(frames_to_tc(-1, 25)))
+`
+    const output = execFileSync('python3', ['-c', script], { encoding: 'utf8' })
+    expect(output).toContain('df_1800=00:01:00;02')
+    expect(output).toContain('df_17982=00:10:00;00')
+    expect(output).toContain('nd_90000=01:00:00:00')
+    expect(output).toContain('df_inverse=1800')
+    expect(output).toContain('df_ten_inverse=17982')
+    expect(output).toContain('nd_inverse=90000')
+    expect(output).toContain('bad_tc=None')
+    expect(output).toContain('negative=None')
+  })
+})
+
+describe('loadRenderPresetPython validation', () => {
+  it('validates the name against the host list before loading and fails closed on an unconfirmed return', () => {
+    const body = loadRenderPresetPython({ presetName: 'H.264 Master' })
+    expect(body).toContain('if name not in names:')
+    expect(body).toContain("ERROR preset-not-found:")
+    expect(body).toContain('if not ok:')
+    expect(body).toContain("print('done=true')")
+  })
+})
 
 describe('generated Python compiles', () => {
   // Syntax-only (ast.parse, no execution): every body must be valid Python on
@@ -404,7 +440,7 @@ describe('addRenderJobPython empty-return defense (executed against a fake proje
     expect(parseOutput(run.output).status).toBe('ok')
     expect(addRenderJobFrom(parseOutput(run.output).fields)).toEqual({
       ok: true,
-      data: { jobCount: 1, firstJobName: 'EP04_20260129', jobId: 'job-9', idSource: 'returned' },
+      data: { jobCount: 1, firstJobName: undefined, jobId: 'job-9', idSource: 'returned' },
     })
     expect(run.addCalls).toHaveLength(1)
   })

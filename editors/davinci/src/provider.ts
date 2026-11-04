@@ -19,7 +19,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { clampTimeout, innerResponseToRaw, scriptTimeoutSeconds } from './protocol.ts'
 import { DavinciService } from './service.ts'
-import type { DavinciCallRequest, DavinciMarkerColor, DavinciScriptTool, DavinciSpec } from './types.ts'
+import type { DavinciCallRequest, DavinciScriptTool, DavinciSpec } from './types.ts'
+
+export { DAVINCI_MARKER_COLORS } from './markers.ts'
+export type { DavinciMarkerColor } from './markers.ts'
 
 /** Plugin config; unset fields fall back to documented defaults. */
 export interface Config {
@@ -48,7 +51,11 @@ export interface Config {
    * 60s, so budgets above that are still clamped down at the exchange.
    */
   readonly maxTimeoutMs?: number
-  /** Directory (relative to the working directory) receiving screenshots. */
+  /**
+   * Directory receiving screenshots: absolute, or relative to the calling
+   * Session's working directory (the tool resolves it before calling the
+   * service).
+   */
   readonly screenshotDir?: string
   /**
    * Deployment-owned pre-approval for this plugin's mutations: skips the
@@ -69,12 +76,6 @@ export const davinciConfigSchema: z<Config> = z.object({
   screenshotDir: z.string().default('.resolve-agent'),
   autoApproveMutations: z.boolean().default(false),
 })
-
-/** Marker colors accepted by `Timeline:AddMarker` on this host. */
-export const DAVINCI_MARKER_COLORS: readonly DavinciMarkerColor[] = [
-  'Blue', 'Cyan', 'Green', 'Yellow', 'Red', 'Pink', 'Purple', 'Fuchsia',
-  'Rose', 'Lavender', 'Sky', 'Mint', 'Tan', 'Beige', 'Brown', 'Chocolate',
-]
 
 const DEFAULT_APPLICATIONS_DIR = '/Applications'
 
@@ -132,8 +133,9 @@ const CALL_ID = 2
 /**
  * Wall-clock grace added on top of the script budget: process spawn, the
  * wrapper's synchronous `--dump-tools` probe, and the JSON-RPC round trip.
+ * Exported so tool deadlines can sit beyond the exchange they wrap.
  */
-const TRANSPORT_GRACE_MS = 5_000
+export const TRANSPORT_GRACE_MS = 5_000
 
 /** Grace for the wrapper to exit on stdin close before a forced kill. */
 const EXIT_GRACE_MS = 2_000
@@ -168,35 +170,49 @@ export class McpDavinci extends DavinciService {
   /**
    * Fail loud on the first call when neither config nor the default location
    * names a server entry: the plugin stays composable on machines without the
-   * server while every actual use names the missing piece.
+   * server while every actual use names the missing piece. Only a found path is
+   * cached, so installing the server later takes effect without a restart.
    * @returns the default server path once it exists.
    */
   private requireMcpServer(): string {
-    if (this.discoveredServer === undefined) {
-      this.discoveredServer = existsSync(defaultMcpServerPath()) ? defaultMcpServerPath() : ''
+    let found = this.discoveredServer
+    if (found === undefined) {
+      const candidate = defaultMcpServerPath()
+      if (existsSync(candidate)) {
+        found = candidate
+        this.discoveredServer = candidate
+      }
     }
-    if (this.discoveredServer === '') {
+    if (found === undefined) {
       throw new Error(
         `davinci-resolve: MCP server entry not found at ${defaultMcpServerPath()} (expected the davinci-mcp stdio server); `
         + "set the mcpServerPath config to the absolute path of the server's index.js",
       )
     }
-    return this.discoveredServer
+    return found
   }
 
-  /** Fail loud on the first call when no Resolve install ships a ResolveMCP binary. */
+  /**
+   * Fail loud on the first call when no Resolve install ships a ResolveMCP
+   * binary. Only a found path is cached so a later install is picked up.
+   */
   private requireResolveMcp(): string {
-    if (this.discoveredResolveMcp === undefined) {
-      this.discoveredResolveMcp = discoverResolveMcp(this.config.applicationsDir ?? DEFAULT_APPLICATIONS_DIR) ?? ''
+    let found = this.discoveredResolveMcp
+    if (found === undefined) {
+      const candidate = discoverResolveMcp(this.config.applicationsDir ?? DEFAULT_APPLICATIONS_DIR)
+      if (candidate !== undefined) {
+        found = candidate
+        this.discoveredResolveMcp = candidate
+      }
     }
-    if (this.discoveredResolveMcp === '') {
+    if (found === undefined) {
       throw new Error(
         `davinci-resolve: no ResolveMCP binary found under ${this.config.applicationsDir ?? DEFAULT_APPLICATIONS_DIR} `
         + '(looked for DaVinci Resolve*/DaVinci Resolve.app/Contents/Applications/ResolveMCP); '
         + 'set the resolveMcpPath config to the absolute path of your install',
       )
     }
-    return this.discoveredResolveMcp
+    return found
   }
 
   private clamp(request: DavinciCallRequest): number {
@@ -239,7 +255,9 @@ export class McpDavinci extends DavinciService {
     timeoutSeconds: number,
     signal: AbortSignal | undefined,
   ): Promise<string> {
-    const wallMs = spec.timeoutMs + TRANSPORT_GRACE_MS
+    // The script's own timeout is whole seconds; anchor the wall clock to the
+    // same budget so a clamped request cannot outlive its script deadline.
+    const wallMs = timeoutSeconds * 1000 + TRANSPORT_GRACE_MS
     return new Promise<string>((resolve, reject) => {
       // An already-aborted signal never fires listeners registered after the
       // abort, so without this precheck a cancelled call would still spawn the
@@ -257,7 +275,7 @@ export class McpDavinci extends DavinciService {
       })
       let settled = false
       let buffer = ''
-      const stderrChunks: string[] = []
+      let stderrTail = ''
 
       const settle = (action: () => void): void => {
         if (settled) return
@@ -295,7 +313,7 @@ export class McpDavinci extends DavinciService {
       child.on('error', (error) => settle(() => reject(error)))
       child.on('exit', (code, exitSignal) => settle(() => reject(new Error(
         `davinci MCP ${tool} server exited before answering (code=${code ?? 'null'} signal=${exitSignal ?? 'null'})`
-        + (stderrChunks.length > 0 ? `; stderr: ${stderrChunks.join('').trim().slice(-300)}` : ''),
+        + (stderrTail !== '' ? `; stderr: ${stderrTail.trim().slice(-300)}` : ''),
       ))))
       child.stdin.on('error', () => {
         // EPIPE when the server dies mid-write; the exit or wall-clock paths settle the exchange.
@@ -314,7 +332,9 @@ export class McpDavinci extends DavinciService {
       })
       child.stderr.setEncoding('utf8')
       child.stderr.on('data', (chunk: string) => {
-        stderrChunks.push(chunk)
+        // Keep only the tail: a noisy or looping server must not grow the
+        // process memory while the exchange is still running.
+        stderrTail = (stderrTail + chunk).slice(-4096)
       })
 
       function handleLine(line: string): void {

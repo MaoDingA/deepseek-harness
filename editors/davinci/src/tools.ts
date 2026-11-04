@@ -1,22 +1,27 @@
 /**
- * Model-facing Consumer surface of the `ctx.davinci` seam: the sixteen
+ * Model-facing Consumer surface of the `ctx.davinci` seam: the nineteen
  * `resolve_*` tools (project info, media pool, timeline items, find-by-tc,
  * find-clip, seek, screenshot, switch-timeline, place, delete, marker, audio
- * items, render status, render presets, add-render-job, render control) plus
- * the system-prompt section teaching the editing conventions. Mutating tools
- * gate through the approval seam before anything executes — the approval
- * prompt is how the user consents.
+ * items, render status, render presets, add-render-job, load/delete render
+ * jobs, render control) plus the system-prompt section teaching the editing
+ * conventions. Mutating tools gate through the approval seam before anything
+ * executes — the approval prompt is how the user consents.
  * @module @deepseek-ai/dsh-davinci/tools
  */
 
+import { isAbsolute, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 // Type-only: makes `ctx.get('approval')` resolve to the ApprovalService
 // augmentation. The seam stays optional at runtime.
 import type {} from '@deepseek-ai/dsh-user-approval'
-import { DAVINCI_MARKER_COLORS, discoverResolveMcp, type Config } from './provider.ts'
+import { DAVINCI_MARKER_COLORS } from './markers.ts'
+import { TRANSPORT_GRACE_MS, discoverResolveMcp, type Config } from './provider.ts'
+import { scriptTimeoutSeconds } from './protocol.ts'
 import type {
   DavinciAudioTimelineItemsInfo,
+  DavinciCallRequest,
   DavinciFindClipInfo,
   DavinciFindByTcInfo,
   DavinciMediaPoolInfo,
@@ -107,6 +112,46 @@ function resultText<T>(result: DavinciResult<T>, format: (data: T) => string): s
   return format(result.data)
 }
 
+/**
+ * Slack added after the provider's own wall clock so the exchange's coded
+ * timeout message reaches the model before the tool-level deadline fires.
+ */
+const TOOL_DEADLINE_SLACK_MS = 2_000
+
+/**
+ * Build the call envelope every operation needs: the script budget and the
+ * caller's cancellation, which the provider forwards to the spawned server.
+ * @param exec - the tool execution owning the signal.
+ * @param budgetMs - requested script budget.
+ * @returns the call envelope.
+ */
+function callEnvelope(exec: Pick<ToolRunContext, 'signal'>, budgetMs: number): DavinciCallRequest {
+  return { timeoutMs: budgetMs, signal: exec.signal }
+}
+
+/**
+ * Tool-level deadline for one script budget: the script's whole-second budget,
+ * the transport grace, and one slack step. Always beyond the provider's own
+ * wall clock, so the provider reports the coded timeout first.
+ * @param budgetMs - requested script budget.
+ * @returns the tool deadline in milliseconds.
+ */
+function toolDeadlineMs(budgetMs: number): number {
+  return scriptTimeoutSeconds(budgetMs) * 1000 + TRANSPORT_GRACE_MS + TOOL_DEADLINE_SLACK_MS
+}
+
+/**
+ * Resolve the configured screenshot directory against the Session's working
+ * directory. An absolute configuration is used as-is.
+ * @param exec - the tool execution carrying the calling agent.
+ * @param configured - the plugin's `screenshotDir` value.
+ * @returns the absolute directory receiving the PNG.
+ */
+function screenshotDirectory(exec: Pick<ToolRunContext, 'agent'>, configured: string): string {
+  if (isAbsolute(configured)) return configured
+  return join(exec.agent?.session.header.cwd ?? process.cwd(), configured)
+}
+
 function projectInfoText(info: DavinciProjectInfo): string {
   const lines = [
     `resolve=${info.resolveVersion} project="${info.projectName}"`,
@@ -127,6 +172,10 @@ function mediaPoolText(info: DavinciMediaPoolInfo): string {
     lines.push(`clip: ${clip.name}`)
     lines.push(`  tc=${clip.startTc ?? '?'} duration=${clip.duration ?? '?'} fps=${clip.fps ?? '?'}`)
     if (clip.filePath !== undefined) lines.push(`  path=${clip.filePath}`)
+  }
+  if (info.binTotal > info.bins.length) lines.push(`(showing ${info.bins.length} of ${info.binTotal} bins)`)
+  if (info.clipTotal > info.clips.length) {
+    lines.push(`(showing ${info.clips.length} of ${info.clipTotal} clips — list a narrower bin)`)
   }
   if (lines.length === 0) return '(empty bin)'
   return lines.join('\n')
@@ -153,7 +202,10 @@ function findClipText(info: DavinciFindClipInfo): string {
   }
   const lines = info.hits.map((hit) =>
     `hit: ${hit.name}  ${hit.timeline} V${hit.trackIndex}  [${hit.recordStart}-${hit.recordEnd}]`)
-  lines.push(`scanned=${info.scanned} hits=${info.hits.length}`)
+  lines.push(`scanned=${info.scanned} hits=${info.hitTotal}`)
+  if (info.hitTotal > info.hits.length) {
+    lines.push(`(showing ${info.hits.length} of ${info.hitTotal} hits — use a narrower name)`)
+  }
   return lines.join('\n')
 }
 
@@ -221,9 +273,8 @@ function renderPresetsText(info: DavinciRenderPresetsInfo): string {
  * @returns the `key=value` result text.
  */
 export function addRenderJobText(info: DavinciRenderJobInfo): string {
-  const lines = [
-    `queued_jobs=${info.jobCount}`,
-  ]
+  const lines: string[] = []
+  if (info.jobCount !== undefined) lines.push(`queued_jobs=${info.jobCount}`)
   if (info.jobId !== undefined) {
     lines.push(info.idSource === 'read-back' ? `job_id=${info.jobId} (读回确认)` : `job_id=${info.jobId}`)
   }
@@ -254,6 +305,13 @@ function deleteRenderJobText(info: DavinciMutationInfo & { readonly jobId: strin
  */
 export function registerDavinciTools(ctx: Context, config: Config): void {
   ctx.systemPrompt.section({ name: 'tool:resolve', order: 120, text: RESOLVE_SECTION })
+  // Fast reads/writes use the configured default budget; whole-project scans
+  // and clip placement use the configured cap, clamped by the sandbox's 60s
+  // script limit inside the provider.
+  const fastBudgetMs = config.defaultTimeoutMs ?? 30_000
+  const scanBudgetMs = config.maxTimeoutMs ?? 60_000
+  const fastDeadlineMs = toolDeadlineMs(fastBudgetMs)
+  const scanDeadlineMs = toolDeadlineMs(scanBudgetMs)
 
   ctx.tools.register(defineTool({
     name: 'resolve_project_info',
@@ -261,23 +319,23 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
       'Query the running DaVinci Resolve: version, current project name, all timeline names, and the current timeline\'s track counts and frame range. Requires Resolve running with a project open. Start here before any other resolve tool.',
     parameters: {},
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 30_000,
-    async execute() {
-      return resultText(await ctx.davinci.projectInfo(), projectInfoText)
+    timeoutMs: fastDeadlineMs,
+    async execute(_args, exec) {
+      return resultText(await ctx.davinci.projectInfo(callEnvelope(exec, fastBudgetMs)), projectInfoText)
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'resolve_media_pool',
     description:
-      'List a media-pool folder (bin) and its clips with name, source Start TC, duration, FPS, and file path. Use bin paths like "VFX" or "VFX/20260702"; omit to list top-level bins.',
+      'List a media-pool folder (bin) and its clips with name, source Start TC, duration, FPS, and file path. Use bin paths like "VFX" or "VFX/20260702"; omit to list top-level bins. Returns at most 200 bins and 200 clips; the totals say how many exist.',
     parameters: {
       bin: { type: 'string', description: 'Bin path like "VFX/20260702"; empty/omitted = root bins' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 30_000,
-    async execute(args) {
-      return resultText(await ctx.davinci.mediaPool(args.bin ?? ''), mediaPoolText)
+    timeoutMs: fastDeadlineMs,
+    async execute(args, exec) {
+      return resultText(await ctx.davinci.mediaPool(args.bin ?? '', callEnvelope(exec, fastBudgetMs)), mediaPoolText)
     },
   }))
 
@@ -291,9 +349,12 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
       to: { type: 'number', description: 'Record frame upper bound (inclusive)' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 45_000,
-    async execute(args) {
-      return resultText(await ctx.davinci.timelineItems(args.trackIndex, args.from, args.to), timelineItemsText)
+    timeoutMs: scanDeadlineMs,
+    async execute(args, exec) {
+      return resultText(
+        await ctx.davinci.timelineItems(args.trackIndex, args.from, args.to, callEnvelope(exec, scanBudgetMs)),
+        timelineItemsText,
+      )
     },
   }))
 
@@ -305,23 +366,23 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
       tc: { type: 'string', required: true, description: 'Source timecode HH:MM:SS:FF, e.g. the deliverable Start TC' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 45_000,
-    async execute(args) {
-      return resultText(await ctx.davinci.findByTc(args.tc), findByTcText)
+    timeoutMs: scanDeadlineMs,
+    async execute(args, exec) {
+      return resultText(await ctx.davinci.findByTc(args.tc, callEnvelope(exec, scanBudgetMs)), findByTcText)
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'resolve_find_clip',
     description:
-      'Search EVERY timeline and EVERY video track for items whose name contains a given substring, in one call. Prefer this over paging resolve_timeline_items when hunting a clip by name (e.g. locating a stray deliverable). Read-only.',
+      'Search EVERY timeline and EVERY video track for items whose name contains a given substring, in one call. Prefer this over paging resolve_timeline_items when hunting a clip by name (e.g. locating a stray deliverable). Read-only. Returns at most 200 hits; the total says how many matched.',
     parameters: {
       name: { type: 'string', required: true, description: 'Case-sensitive substring, e.g. "6585" or "ZY_EP04"' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 45_000,
-    async execute(args) {
-      return resultText(await ctx.davinci.findClip(args.name), findClipText)
+    timeoutMs: scanDeadlineMs,
+    async execute(args, exec) {
+      return resultText(await ctx.davinci.findClip(args.name, callEnvelope(exec, scanBudgetMs)), findClipText)
     },
   }))
 
@@ -334,9 +395,12 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
       tc: { type: 'string', description: 'Timecode HH:MM:SS:FF to seek to (alternative to frame)' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 30_000,
-    async execute(args) {
-      return resultText(await ctx.davinci.seek(args.frame, args.tc), seekText)
+    timeoutMs: fastDeadlineMs,
+    async execute(args, exec) {
+      if (args.frame === undefined && args.tc === undefined) {
+        throw new Error('resolve_seek needs a record frame or a timecode — nothing was moved')
+      }
+      return resultText(await ctx.davinci.seek(args.frame, args.tc, callEnvelope(exec, fastBudgetMs)), seekText)
     },
   }))
 
@@ -348,15 +412,19 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
       activate: { type: 'boolean', description: 'Bring DaVinci Resolve to the front before capturing (takes window focus)' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 15_000,
-    async execute(args) {
-      if (args.activate === true && config.resolveMcpPath === undefined && discoverResolveMcp() === undefined) {
-        throw new Error('activate requested but no DaVinci Resolve install found under /Applications — set resolveMcpPath in config')
+    timeoutMs: fastDeadlineMs,
+    async execute(args, exec) {
+      if (args.activate === true && config.resolveMcpPath === undefined
+        && discoverResolveMcp(config.applicationsDir ?? '/Applications') === undefined) {
+        throw new Error('activate requested but no DaVinci Resolve install found under the configured applicationsDir — set resolveMcpPath in config')
       }
-      return await ctx.davinci.screenshot({
-        activate: args.activate === true,
-        screenshotDir: config.screenshotDir ?? '.resolve-agent',
-      })
+      return resultText(
+        await ctx.davinci.screenshot({
+          activate: args.activate === true,
+          screenshotDir: screenshotDirectory(exec, config.screenshotDir ?? '.resolve-agent'),
+        }, callEnvelope(exec, fastBudgetMs)),
+        (info) => info.path,
+      )
     },
   }))
 
@@ -369,19 +437,22 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
       name: { type: 'string', description: 'Exact timeline name; used when index is omitted' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 30_000,
-    async execute(args) {
+    timeoutMs: fastDeadlineMs,
+    async execute(args, exec) {
       if (args.index === undefined && args.name === undefined) {
         throw new Error('resolve_switch_timeline needs an index or a timeline name — list the project\'s timelines with resolve_project_info first')
       }
-      return resultText(await ctx.davinci.switchTimeline(args.index, args.name), switchTimelineText)
+      return resultText(
+        await ctx.davinci.switchTimeline(args.index, args.name, callEnvelope(exec, fastBudgetMs)),
+        switchTimelineText,
+      )
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'resolve_place_clip',
     description:
-      'Place a media-pool clip onto the current timeline at a record frame with overwrite semantics (the VFX paste convention: V2 track, start frame aligned with the target V1 segment). Approval-gated: the approval prompt is how the user consents — do not ask in chat first.',
+      'Append a media-pool clip to the tail of the current timeline, then verify the landing against the requested video track and record frame. Resolve 21\'s scripting surface has no positioned insert: the append always lands on the timeline tail, so a mismatched placement is rolled back and the call fails with the actual coordinates. For a true positioned insert, drive the Edit page UI. Approval-gated: the approval prompt is how the user consents — do not ask in chat first.',
     parameters: {
       bin: { type: 'string', required: true, description: 'Bin path of the clip, e.g. "VFX/20260702"' },
       clipName: { type: 'string', required: true, description: 'Exact clip name in the bin' },
@@ -389,16 +460,19 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
       recordFrame: { type: 'number', required: true, description: 'Timeline record frame to place at' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 45_000,
+    timeoutMs: scanDeadlineMs,
     async execute(args, exec) {
       await requireWriteApproval({
         approval: ctx.get('approval'),
         preApproved: config.autoApproveMutations,
         exec,
-        reason: `place clip "${args.clipName}" from bin ${args.bin} at record frame ${args.recordFrame} on video track ${args.trackIndex} (overwrite)`,
+        reason: `place clip "${args.clipName}" from bin ${args.bin} at record frame ${args.recordFrame} on video track ${args.trackIndex} (append + landing check)`,
       })
       return resultText(
-        await ctx.davinci.place({ bin: args.bin, clipName: args.clipName, trackIndex: args.trackIndex, recordFrame: args.recordFrame }),
+        await ctx.davinci.place(
+          { bin: args.bin, clipName: args.clipName, trackIndex: args.trackIndex, recordFrame: args.recordFrame },
+          callEnvelope(exec, scanBudgetMs),
+        ),
         mutationText,
       )
     },
@@ -413,7 +487,7 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
       startFrame: { type: 'number', required: true, description: 'Record frame the item starts at (from resolve_timeline_items)' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 45_000,
+    timeoutMs: scanDeadlineMs,
     async execute(args, exec) {
       await requireWriteApproval({
         approval: ctx.get('approval'),
@@ -421,7 +495,10 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
         exec,
         reason: `delete the item starting at record frame ${args.startFrame} on video track ${args.trackIndex}`,
       })
-      return resultText(await ctx.davinci.remove({ trackIndex: args.trackIndex, startFrame: args.startFrame }), mutationText)
+      return resultText(
+        await ctx.davinci.remove({ trackIndex: args.trackIndex, startFrame: args.startFrame }, callEnvelope(exec, scanBudgetMs)),
+        mutationText,
+      )
     },
   }))
 
@@ -435,9 +512,12 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
       to: { type: 'number', description: 'Record frame upper bound (inclusive)' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 45_000,
-    async execute(args) {
-      return resultText(await ctx.davinci.audioTimelineItems(args.trackIndex, args.from, args.to), audioTimelineItemsText)
+    timeoutMs: scanDeadlineMs,
+    async execute(args, exec) {
+      return resultText(
+        await ctx.davinci.audioTimelineItems(args.trackIndex, args.from, args.to, callEnvelope(exec, scanBudgetMs)),
+        audioTimelineItemsText,
+      )
     },
   }))
 
@@ -447,9 +527,9 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
       'Read the live render-engine state: queued-job count, is-rendering flag, the current (format, codec) pair, and the sizes of the selectable preset and format lists (absent on builds without them). Read-only. Use before enqueueing or starting a render to confirm the current Resolve settings.',
     parameters: {},
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 30_000,
-    async execute() {
-      return resultText(await ctx.davinci.renderStatus(), renderStatusText)
+    timeoutMs: fastDeadlineMs,
+    async execute(_args, exec) {
+      return resultText(await ctx.davinci.renderStatus(callEnvelope(exec, fastBudgetMs)), renderStatusText)
     },
   }))
 
@@ -459,9 +539,9 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
       'Read the render engine\'s active (format, codec) pair and the selectable render preset list (empty when this Resolve build exposes none). Read-only. Use before switching presets or enqueueing to confirm what will render.',
     parameters: {},
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 30_000,
-    async execute() {
-      return resultText(await ctx.davinci.renderPresets(), renderPresetsText)
+    timeoutMs: fastDeadlineMs,
+    async execute(_args, exec) {
+      return resultText(await ctx.davinci.renderPresets(callEnvelope(exec, fastBudgetMs)), renderPresetsText)
     },
   }))
 
@@ -473,7 +553,7 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
       targetDir: { type: 'string', required: true, description: 'Absolute target directory the render output will land in' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 45_000,
+    timeoutMs: scanDeadlineMs,
     async execute(args, exec) {
       await requireWriteApproval({
         approval: ctx.get('approval'),
@@ -481,19 +561,22 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
         exec,
         reason: `enqueue the current timeline for render into ${args.targetDir} (active render settings preserved)`,
       })
-      return resultText(await ctx.davinci.addRenderJob({ targetDir: args.targetDir }), addRenderJobText)
+      return resultText(
+        await ctx.davinci.addRenderJob({ targetDir: args.targetDir }, callEnvelope(exec, scanBudgetMs)),
+        addRenderJobText,
+      )
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'resolve_load_render_preset',
     description:
-      'Make one render preset active by its exact name; the name must match an entry resolve_render_presets listed. Refuses when the name is not in that list or this Resolve build cannot switch presets. The active render settings stay as they are on any refusal. Approval-gated: the approval prompt is how the user consents — do not ask in chat first.',
+      'Make one render preset active by its exact name. The name is first checked against the preset list this Resolve build reports (read it with resolve_render_presets); a name outside that list refuses with preset-not-found without touching the host, and a host that does not confirm the load is an api-failed refusal. The active render settings stay as they are on any refusal. Approval-gated: the approval prompt is how the user consents — do not ask in chat first.',
     parameters: {
       presetName: { type: 'string', required: true, description: 'Exact preset name as reported by resolve_render_presets (case-sensitive).' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 30_000,
+    timeoutMs: fastDeadlineMs,
     async execute(args, exec) {
       await requireWriteApproval({
         approval: ctx.get('approval'),
@@ -501,7 +584,10 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
         exec,
         reason: `load render preset "${args.presetName}"`,
       })
-      return resultText(await ctx.davinci.loadRenderPreset({ presetName: args.presetName }), loadRenderPresetText)
+      return resultText(
+        await ctx.davinci.loadRenderPreset({ presetName: args.presetName }, callEnvelope(exec, fastBudgetMs)),
+        loadRenderPresetText,
+      )
     },
   }))
 
@@ -513,7 +599,7 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
       jobId: { type: 'string', required: true, description: 'The job id returned by resolve_add_render_job.' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 30_000,
+    timeoutMs: fastDeadlineMs,
     async execute(args, exec) {
       await requireWriteApproval({
         approval: ctx.get('approval'),
@@ -521,7 +607,10 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
         exec,
         reason: `delete render job ${args.jobId} from the queue`,
       })
-      return resultText(await ctx.davinci.deleteRenderJob({ jobId: args.jobId }), deleteRenderJobText)
+      return resultText(
+        await ctx.davinci.deleteRenderJob({ jobId: args.jobId }, callEnvelope(exec, fastBudgetMs)),
+        deleteRenderJobText,
+      )
     },
   }))
 
@@ -533,7 +622,7 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
       jobIds: { type: 'array', items: { type: 'string' }, description: 'Job ids to start; omit to start the whole queue' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 30_000,
+    timeoutMs: fastDeadlineMs,
     async execute(args, exec) {
       await requireWriteApproval({
         approval: ctx.get('approval'),
@@ -543,7 +632,10 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
           ? `start rendering jobs: ${args.jobIds.join(', ')}`
           : 'start rendering the whole queue',
       })
-      return resultText(await ctx.davinci.startRendering({ jobIds: args.jobIds }), mutationText)
+      return resultText(
+        await ctx.davinci.startRendering({ jobIds: args.jobIds }, callEnvelope(exec, fastBudgetMs)),
+        mutationText,
+      )
     },
   }))
 
@@ -555,7 +647,7 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
       jobIds: { type: 'array', items: { type: 'string' }, description: 'Job ids to stop; omit to stop the whole engine' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 30_000,
+    timeoutMs: fastDeadlineMs,
     async execute(args, exec) {
       await requireWriteApproval({
         approval: ctx.get('approval'),
@@ -565,7 +657,10 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
           ? `stop rendering jobs: ${args.jobIds.join(', ')}`
           : 'stop the render engine (whole queue)',
       })
-      return resultText(await ctx.davinci.stopRendering({ jobIds: args.jobIds }), mutationText)
+      return resultText(
+        await ctx.davinci.stopRendering({ jobIds: args.jobIds }, callEnvelope(exec, fastBudgetMs)),
+        mutationText,
+      )
     },
   }))
 
@@ -581,7 +676,7 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
       durationFrames: { type: 'number', description: 'Marker duration in frames (default 1)' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    timeoutMs: 30_000,
+    timeoutMs: fastDeadlineMs,
     async execute(args, exec) {
       await requireWriteApproval({
         approval: ctx.get('approval'),
@@ -596,7 +691,7 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
           name: args.name,
           note: args.note ?? '',
           durationFrames: args.durationFrames,
-        }),
+        }, callEnvelope(exec, fastBudgetMs)),
         mutationText,
       )
     },

@@ -5,6 +5,10 @@
  * @module @deepseek-ai/dsh-davinci/types
  */
 
+import type { DavinciMarkerColor } from './markers.ts'
+
+export type { DavinciMarkerColor }
+
 /**
  * Caller-side call envelope. Every field is optional; the provider's
  * {@link DavinciService.resolve} step fills defaults and clamps.
@@ -85,10 +89,18 @@ export interface DavinciClipInfo {
   readonly filePath: string | undefined
 }
 
-/** Contents of one media-pool folder (bin). */
+/**
+ * Contents of one media-pool folder (bin). Row lists are capped at 200, so the
+ * totals below tell the caller how many entries exist beyond the returned
+ * rows.
+ */
 export interface DavinciMediaPoolInfo {
   readonly bins: readonly DavinciBinSummary[]
+  /** Bins in the folder, including any beyond the returned rows. */
+  readonly binTotal: number
   readonly clips: readonly DavinciClipInfo[]
+  /** Clips in the folder, including any beyond the returned rows. */
+  readonly clipTotal: number
 }
 
 /** One timeline segment on a video track, in record-frame coordinates. */
@@ -135,6 +147,8 @@ export interface DavinciFindClipHitInfo {
 /** Result of a project-wide clip-name search across every timeline and video track. */
 export interface DavinciFindClipInfo {
   readonly scanned: number
+  /** Total matching items, including any beyond the returned rows. */
+  readonly hitTotal: number
   readonly hits: readonly DavinciFindClipHitInfo[]
 }
 
@@ -241,10 +255,11 @@ export interface DavinciRenderPresetsInfo {
  * `api-failed` instead of guessing.
  *
  * Resolve 21.1 reports the new job's id in `jobId` and its queue name in
- * `firstJobName`; `jobCount` is the post-enqueue queue depth.
+ * `firstJobName`; `jobCount` is the post-enqueue queue depth, undefined when
+ * the post-enqueue queue read failed.
  */
 export interface DavinciRenderJobInfo {
-  readonly jobCount: number
+  readonly jobCount: number | undefined
   readonly firstJobName: string | undefined
   readonly jobId: string | undefined
   /** How `jobId` was established: the host's return, or a queue read-back. */
@@ -283,14 +298,6 @@ export interface DavinciDeleteRenderJobRequest {
   readonly jobId: string
 }
 
-/**
- * Marker colors accepted by `Timeline:AddMarker`. Keep in sync with the
- * runtime `DAVINCI_MARKER_COLORS` list in the provider.
- */
-export type DavinciMarkerColor =
-  | 'Blue' | 'Cyan' | 'Green' | 'Yellow' | 'Red' | 'Pink' | 'Purple' | 'Fuchsia'
-  | 'Rose' | 'Lavender' | 'Sky' | 'Mint' | 'Tan' | 'Beige' | 'Brown' | 'Chocolate'
-
 /** Timeline marker request; `frame` is an absolute record frame. */
 export interface DavinciMarkerRequest {
   readonly frame: number
@@ -301,13 +308,19 @@ export interface DavinciMarkerRequest {
   readonly durationFrames: number | undefined
 }
 
-/** Screenshot request: capture the Resolve UI to a PNG under a workspace dir. */
+/** Screenshot request: capture the Resolve UI to a PNG. */
 export interface DavinciScreenshotRequest {
   /** Bring the Resolve `.app` to the front before the foreground check. */
   readonly activate: boolean
   /**
-   * Directory receiving the PNG, relative to the working directory; the
-   * caller resolves it against the plugin config's `screenshotDir`.
+   * Absolute directory receiving the PNG. The tool resolves the configured
+   * `screenshotDir` against the Session's working directory first.
    */
   readonly screenshotDir: string
+}
+
+/** Absolute path of the PNG a screenshot wrote. */
+export interface DavinciScreenshotInfo {
+  /** Absolute path of the written PNG. */
+  readonly path: string
 }

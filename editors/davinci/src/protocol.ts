@@ -93,7 +93,7 @@ export function parseOutput(raw: string): ParsedOutput {
 
 function text(fields: ReadonlyMap<string, string>, key: string): string | undefined {
   const value = fields.get(key)
-  if (value === undefined || value === '' || value === 'nil') return undefined
+  if (value === undefined || value === '') return undefined
   return value
 }
 
@@ -158,8 +158,10 @@ export function projectInfoFrom(fields: ReadonlyMap<string, string>): DavinciPro
  * @returns the bins and clips of the listed folder.
  */
 export function mediaPoolFrom(fields: ReadonlyMap<string, string>): DavinciMediaPoolInfo {
-  const binCount = numeric(fields, 'bin_count') ?? 0
-  const clipCount = numeric(fields, 'clip_count') ?? 0
+  const binTotal = numeric(fields, 'bin_count') ?? 0
+  const clipTotal = numeric(fields, 'clip_count') ?? 0
+  const binCount = Math.min(binTotal, MAX_LISTED_ITEMS)
+  const clipCount = Math.min(clipTotal, MAX_LISTED_ITEMS)
   const bins: DavinciBinSummary[] = indexedRows(fields, 'bin', binCount, ['name', 'clips'])
     .map((row, i) => ({ name: row.name ?? `bin ${i + 1}`, clipCount: Number(row.clips ?? 0) }))
   const clips: DavinciClipInfo[] = indexedRows(
@@ -174,7 +176,7 @@ export function mediaPoolFrom(fields: ReadonlyMap<string, string>): DavinciMedia
     fps: row.fps,
     filePath: row.path,
   }))
-  return { bins, clips }
+  return { bins, binTotal, clips, clipTotal }
 }
 
 /**
@@ -285,7 +287,7 @@ export function addRenderJobFrom(fields: ReadonlyMap<string, string>): DavinciRe
   return {
     ok: true,
     data: {
-      jobCount: numeric(fields, 'job_count') ?? 1,
+      jobCount: numeric(fields, 'job_count'),
       firstJobName: text(fields, 'first_job_name'),
       jobId: text(fields, 'job_id'),
       idSource: fields.get('id_source') === 'read-back' ? 'read-back' : 'returned',
@@ -400,11 +402,11 @@ export function findByTcFrom(fields: ReadonlyMap<string, string>): DavinciFindBy
  * @returns scan count and the matching placements.
  */
 export function findClipFrom(fields: ReadonlyMap<string, string>): DavinciFindClipInfo {
-  const hits = numeric(fields, 'hits') ?? 0
+  const hitTotal = numeric(fields, 'hits') ?? 0
   const rows: DavinciFindClipHitInfo[] = indexedRows(
     fields,
     'hit',
-    hits,
+    Math.min(hitTotal, MAX_LISTED_ITEMS),
     ['timeline', 'track', 'name', 'start', 'end'],
   ).map((row) => ({
     timeline: row.timeline ?? '',
@@ -413,7 +415,7 @@ export function findClipFrom(fields: ReadonlyMap<string, string>): DavinciFindCl
     recordStart: Number(row.start ?? 0),
     recordEnd: Number(row.end ?? 0),
   }))
-  return { scanned: numeric(fields, 'scanned') ?? 0, hits: rows }
+  return { scanned: numeric(fields, 'scanned') ?? 0, hitTotal, hits: rows }
 }
 
 /**
@@ -514,7 +516,8 @@ export function innerResponseToRaw(tool: string, text: string): string {
     return `ERROR api-failed: ${lastExceptionLine(error)}`
   }
   const output = (inner as { output?: unknown }).output
-  return typeof output === 'string' ? output : ''
+  if (typeof output === 'string') return output
+  throw new Error(`davinci MCP ${tool} response carried neither output nor error: ${text.slice(0, 200)}`)
 }
 
 /**
