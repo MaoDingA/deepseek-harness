@@ -11,6 +11,8 @@ import {
   mediaPoolFrom,
   mutationFrom,
   parseOutput,
+  placementCheckFrom,
+  placementPlanFrom,
   projectInfoFrom,
   renderingControlFrom,
   renderStatusFrom,
@@ -215,6 +217,95 @@ describe('projections', () => {
     ]))
     expect(info.hitTotal).toBe(250)
     expect(info.hits).toHaveLength(200)
+  })
+
+  it('placementPlanFrom reads the match, landing frame, verdict, and conflicts', () => {
+    const info = placementPlanFrom(fieldsOf([
+      ['plan_count', '2'],
+      ['fps', '25'],
+      ['match_track', '1'],
+      ['target_track', '2'],
+      ['scanned', '2'],
+      ['plan_1_clip', 'ZY_EP04_4650_CMP_v006.mov'],
+      ['plan_1_tc', '05:32:12:00'],
+      ['plan_1_frames', '120'],
+      ['plan_1_segment', 'B003C002.mxf'],
+      ['plan_1_seg_start', '86400'],
+      ['plan_1_seg_end', '86835'],
+      ['plan_1_landing', '86400'],
+      ['plan_1_end', '86520'],
+      ['plan_1_overhang', '-315'],
+      ['plan_1_verdict', 'ready'],
+      ['plan_1_conflicts', ''],
+      ['plan_2_clip', 'ZY_EP04_4700_CMP_v002.mov'],
+      ['plan_2_tc', '06:10:00:00'],
+      ['plan_2_frames', '50'],
+      ['plan_2_verdict', 'no-match'],
+    ]))
+    expect(info.fps).toBe(25)
+    expect(info.matchTrack).toBe(1)
+    expect(info.targetTrack).toBe(2)
+    expect(info.scanned).toBe(2)
+    expect(info.entries[0]).toEqual({
+      clipName: 'ZY_EP04_4650_CMP_v006.mov',
+      sourceTc: '05:32:12:00',
+      frames: 120,
+      segmentName: 'B003C002.mxf',
+      segmentRecordStart: 86400,
+      segmentRecordEnd: 86835,
+      landingFrame: 86400,
+      targetEndFrame: 86520,
+      overhangFrames: -315,
+      verdict: 'ready',
+      conflicts: [],
+    })
+    expect(info.entries[1]).toMatchObject({ verdict: 'no-match', segmentName: undefined, landingFrame: undefined })
+  })
+
+  it('placementPlanFrom splits conflicts and caps rows at MAX_LISTED_ITEMS', () => {
+    const info = placementPlanFrom(fieldsOf([
+      ['plan_count', '250'],
+      ['scanned', '250'],
+      ['plan_1_verdict', 'occupied'],
+      ['plan_1_conflicts', 'A V2 [10-20];B V2 [30-40]'],
+    ]))
+    expect(info.entries[0]?.conflicts).toEqual(['A V2 [10-20]', 'B V2 [30-40]'])
+    expect(info.entries).toHaveLength(200)
+  })
+
+  it('placementCheckFrom reads covered/offset/no-segment rows and counts', () => {
+    const info = placementCheckFrom(fieldsOf([
+      ['check_count', '3'],
+      ['match_track', '1'],
+      ['target_track', '2'],
+      ['checked', '3'],
+      ['covered', '1'],
+      ['offset', '1'],
+      ['missing', '1'],
+      ['check_1_name', 'vfx_a.mov'],
+      ['check_1_start', '86400'],
+      ['check_1_end', '86520'],
+      ['check_1_segment', 'B003C002.mxf'],
+      ['check_1_seg_start', '86400'],
+      ['check_1_seg_end', '86835'],
+      ['check_1_delta', '0'],
+      ['check_1_verdict', 'covered'],
+      ['check_2_name', 'vfx_b.mov'],
+      ['check_2_start', '87000'],
+      ['check_2_end', '87050'],
+      ['check_2_segment', 'B033C010.mxf'],
+      ['check_2_seg_start', '86914'],
+      ['check_2_delta', '86'],
+      ['check_2_verdict', 'offset'],
+      ['check_3_name', 'vfx_c.mov'],
+      ['check_3_start', '90000'],
+      ['check_3_end', '90010'],
+      ['check_3_verdict', 'no-segment'],
+    ]))
+    expect(info).toMatchObject({ matchTrack: 1, targetTrack: 2, checked: 3, covered: 1, offset: 1, missing: 1 })
+    expect(info.entries[0]).toMatchObject({ verdict: 'covered', deltaFrames: 0 })
+    expect(info.entries[1]).toMatchObject({ verdict: 'offset', deltaFrames: 86, segmentName: 'B033C010.mxf' })
+    expect(info.entries[2]).toMatchObject({ verdict: 'no-segment', segmentName: undefined, deltaFrames: undefined })
   })
 
   it('seekFrom maps a refused move to an api-failed result', () => {

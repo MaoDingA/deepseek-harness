@@ -17,6 +17,10 @@ import type {
   DavinciFailureCode,
   DavinciMediaPoolInfo,
   DavinciMutationInfo,
+  DavinciPlacementCheckEntry,
+  DavinciPlacementCheckInfo,
+  DavinciPlacementPlanEntry,
+  DavinciPlacementPlanInfo,
   DavinciProjectInfo,
   DavinciRenderJobInfo,
   DavinciRenderPresetsInfo,
@@ -41,6 +45,7 @@ const FAILURE_CODES: readonly DavinciFailureCode[] = [
   'ambiguous-job',
   'preset-not-found',
   'bad-tc',
+  'placement-blocked',
   'api-failed',
   'spawn-failed',
   'timeout',
@@ -464,6 +469,86 @@ export function mutationFrom(fields: ReadonlyMap<string, string>, op: string): D
     return { ok: false, code: 'api-failed', message: `Resolve returned false for ${op}; nothing was changed` }
   }
   return { ok: true, data: { done } }
+}
+
+/**
+ * Project the VFX placement plan rows: per-deliverable match, landing frame,
+ * target end, verdict, and the items blocking the target range.
+ * @param fields - parsed kv fields from the placement-plan body.
+ * @returns the plan rows plus the scan facts.
+ */
+export function placementPlanFrom(fields: ReadonlyMap<string, string>): DavinciPlacementPlanInfo {
+  const count = numeric(fields, 'plan_count') ?? 0
+  const entries: DavinciPlacementPlanEntry[] = indexedRows(
+    fields,
+    'plan',
+    Math.min(count, MAX_LISTED_ITEMS),
+    ['clip', 'tc', 'frames', 'segment', 'seg_start', 'seg_end', 'landing', 'end', 'overhang', 'verdict', 'conflicts'],
+  ).map((row) => ({
+    clipName: row.clip ?? '',
+    sourceTc: row.tc ?? '',
+    frames: Number(row.frames ?? 0),
+    segmentName: row.segment,
+    segmentRecordStart: finiteNumber(row.seg_start),
+    segmentRecordEnd: finiteNumber(row.seg_end),
+    landingFrame: finiteNumber(row.landing),
+    targetEndFrame: finiteNumber(row.end),
+    overhangFrames: finiteNumber(row.overhang),
+    verdict: row.verdict === 'ready' || row.verdict === 'occupied' ? row.verdict : 'no-match',
+    conflicts: (row.conflicts ?? '').split(';').filter((value) => value !== ''),
+  }))
+  return {
+    fps: numeric(fields, 'fps') ?? 0,
+    matchTrack: numeric(fields, 'match_track') ?? 1,
+    targetTrack: numeric(fields, 'target_track') ?? 2,
+    scanned: numeric(fields, 'scanned') ?? 0,
+    entries,
+  }
+}
+
+/**
+ * Project the structural placement-check rows: each target-track item against
+ * its closest match-track segment.
+ * @param fields - parsed kv fields from the placement-check body.
+ * @returns the check rows plus the aggregate counts.
+ */
+export function placementCheckFrom(fields: ReadonlyMap<string, string>): DavinciPlacementCheckInfo {
+  const count = numeric(fields, 'check_count') ?? 0
+  const entries: DavinciPlacementCheckEntry[] = indexedRows(
+    fields,
+    'check',
+    Math.min(count, MAX_LISTED_ITEMS),
+    ['name', 'start', 'end', 'segment', 'seg_start', 'seg_end', 'delta', 'verdict'],
+  ).map((row) => ({
+    targetName: row.name ?? '',
+    targetStart: Number(row.start ?? 0),
+    targetEnd: Number(row.end ?? 0),
+    segmentName: row.segment,
+    segmentStart: finiteNumber(row.seg_start),
+    segmentEnd: finiteNumber(row.seg_end),
+    deltaFrames: finiteNumber(row.delta),
+    verdict: row.verdict === 'offset' || row.verdict === 'no-segment' ? row.verdict : 'covered',
+  }))
+  return {
+    matchTrack: numeric(fields, 'match_track') ?? 1,
+    targetTrack: numeric(fields, 'target_track') ?? 2,
+    checked: numeric(fields, 'checked') ?? 0,
+    covered: numeric(fields, 'covered') ?? 0,
+    offset: numeric(fields, 'offset') ?? 0,
+    missing: numeric(fields, 'missing') ?? 0,
+    entries,
+  }
+}
+
+/**
+ * Parse an optional numeric row field; absent or non-finite reads as undefined.
+ * @param value - raw row value.
+ * @returns the finite number, or undefined.
+ */
+function finiteNumber(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : undefined
 }
 
 /**

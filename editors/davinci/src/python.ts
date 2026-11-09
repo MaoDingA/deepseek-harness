@@ -24,6 +24,7 @@ import type {
   DavinciMarkerRequest,
   DavinciPlaceRequest,
   DavinciRenderingControlRequest,
+  DavinciUiPlacementRequest,
 } from './types.ts'
 
 /**
@@ -570,6 +571,373 @@ else:
     removed = rollback_appended()
     print('rolled_back=' + s(removed is True))
     print('ERROR mislanded-placement: requested video track ' + s(track_index) + ' at record frame ' + s(record_frame) + "; Resolve 21's only positioned placement is tail-append, which landed on video track " + s(actual_track) + ' at record frame ' + s(actual_start) + ' (end ' + s(actual_end) + '). The item was rolled back via DeleteClips to leave the timeline unchanged. For a true positioned insert, use the Edit page (select + drag on the UI), or run a fuscript that drives the Resolve UI.')
+`
+}
+
+/**
+ * AppleScript that clicks Resolve's "Place On Top" menu item, searching every
+ * top-level menu for the English or Chinese label and falling back to the F12
+ * shortcut when the item is not exposed. Exported for the UI-placement body
+ * and its tests.
+ */
+export const PLACE_ON_TOP_APPLESCRIPT = `tell application "System Events"
+  if not (exists process "DaVinci Resolve") then error "DaVinci Resolve process not found"
+  tell process "DaVinci Resolve"
+    set foundItem to missing value
+    repeat with bar in menu bar items of menu bar 1
+      repeat with m in menus of bar
+        repeat with mi in menu items of m
+          set nm to name of mi
+          if nm is not missing value then
+            if nm is "Place On Top" or nm is "Place on Top" or nm is "叠加" then
+              set foundItem to mi
+            end if
+          end if
+        end repeat
+      end repeat
+    end repeat
+    if foundItem is missing value then
+      key code 111
+    else
+      click foundItem
+    end if
+  end tell
+end tell`
+
+/**
+ * Body planning a VFX layup: for every deliverable in a bin (or one named
+ * clip), find the match-track segment whose source TC range covers the
+ * deliverable's Start TC, compute the landing record frame from the offset
+ * inside that segment, and report whether the target track and every track
+ * above it are free over the target range.
+ * @param bin - bin path holding the deliverables; empty string is the root.
+ * @param clipName - one deliverable name, or undefined for the whole bin.
+ * @param matchTrack - 1-based video track whose source TC range is matched.
+ * @param targetTrack - 1-based video track the deliverable would land on.
+ * @returns Python source for {@link pythonScriptOf}.
+ */
+export function placementPlanPython(
+  bin: string,
+  clipName: string | undefined,
+  matchTrack: number,
+  targetTrack: number,
+): string {
+  const wanted = clipName === undefined ? 'None' : JSON.stringify(clipName)
+  return `
+t = current_timeline()
+if t is None:
+    return
+fps = timeline_fps()
+if fps is None:
+    print('ERROR api-failed: could not read timelineFrameRate; VFX placement planning needs it')
+    return
+folder, missing = find_bin(${JSON.stringify(bin)})
+if folder is None:
+    print('ERROR bin-not-found: ' + s(missing))
+    return
+
+def clip_frames(item):
+    try:
+        value = float(s(item.GetClipProperty('Frames') or ''))
+    except (TypeError, ValueError):
+        return 0
+    return int(value) if value > 0 else 0
+
+segments = []
+for it in each(t.GetItemListInTrack('video', ${matchTrack})):
+    mpi = it.GetMediaPoolItem() if hasattr(it, 'GetMediaPoolItem') else None
+    if mpi is None:
+        continue
+    start = tc_to_frames(s(mpi.GetClipProperty('Start TC') or ''), fps)
+    frames = clip_frames(mpi)
+    if start is not None and frames > 0:
+        segments.append((it, start, frames))
+
+targets = []
+for ti in range(${targetTrack}, int(t.GetTrackCount('video')) + 1):
+    for it in each(t.GetItemListInTrack('video', ti)):
+        targets.append((ti, it.GetStart(), it.GetEnd(), s(it.GetName())))
+
+wanted = ${wanted}
+plans = 0
+scanned = 0
+for c in each(folder.GetClipList()):
+    name = s(c.GetName())
+    if wanted is not None and name != wanted:
+        continue
+    scanned = scanned + 1
+    tc = s(c.GetClipProperty('Start TC') or '')
+    frames = clip_frames(c)
+    source_start = tc_to_frames(tc, fps)
+    segment = None
+    if source_start is not None and frames > 0:
+        for seg in segments:
+            if source_start >= seg[1] and source_start < seg[1] + seg[2]:
+                segment = seg
+                break
+    segment_name = ''
+    seg_start_record = None
+    seg_end_record = None
+    landing = None
+    target_end = None
+    overhang = None
+    conflicts = []
+    verdict = 'no-match'
+    if segment is not None:
+        offset = source_start - segment[1]
+        landing = segment[0].GetStart() + offset
+        target_end = landing + frames
+        overhang = target_end - segment[0].GetEnd()
+        segment_name = s(segment[0].GetName())
+        seg_start_record = segment[0].GetStart()
+        seg_end_record = segment[0].GetEnd()
+        for (ti, start, end, tname) in targets:
+            if not (end <= landing or start >= target_end):
+                conflicts.append(tname + ' V' + str(ti) + ' [' + str(start) + '-' + str(end) + ']')
+        verdict = 'occupied' if conflicts else 'ready'
+    plans = plans + 1
+    if plans <= ${MAX_LISTED_ITEMS}:
+        print('plan_' + str(plans) + '_clip=' + name)
+        print('plan_' + str(plans) + '_tc=' + tc)
+        print('plan_' + str(plans) + '_frames=' + str(frames))
+        print('plan_' + str(plans) + '_segment=' + segment_name)
+        print('plan_' + str(plans) + '_seg_start=' + s(seg_start_record))
+        print('plan_' + str(plans) + '_seg_end=' + s(seg_end_record))
+        print('plan_' + str(plans) + '_landing=' + s(landing))
+        print('plan_' + str(plans) + '_end=' + s(target_end))
+        print('plan_' + str(plans) + '_overhang=' + s(overhang))
+        print('plan_' + str(plans) + '_verdict=' + verdict)
+        print('plan_' + str(plans) + '_conflicts=' + ';'.join(conflicts))
+if scanned == 0:
+    if wanted is None:
+        print('ERROR clip-not-found: bin ' + ${JSON.stringify(bin)} + ' has no clips')
+    else:
+        print('ERROR clip-not-found: no clip named ' + wanted + ' in bin ' + ${JSON.stringify(bin)})
+    return
+print('plan_count=' + str(plans))
+print('fps=' + s(fps))
+print('match_track=' + str(${matchTrack}))
+print('target_track=' + str(${targetTrack}))
+print('scanned=' + str(scanned))
+`
+}
+
+/**
+ * Body structurally checking a VFX layup: for each item on the target track,
+ * find the closest match-track segment by start frame and report whether the
+ * target starts exactly on it (`covered`), at an offset, or on no segment.
+ * @param matchTrack - 1-based video track holding the picture cut.
+ * @param targetTrack - 1-based video track holding the placed deliverables.
+ * @param from - optional record-frame lower bound for the target items.
+ * @param to - optional record-frame upper bound for the target items.
+ * @returns Python source for {@link pythonScriptOf}.
+ */
+export function placementCheckPython(
+  matchTrack: number,
+  targetTrack: number,
+  from: number | undefined,
+  to: number | undefined,
+): string {
+  return `
+t = current_timeline()
+if t is None:
+    return
+from_ = ${from === undefined ? 'None' : from}
+to_ = ${to === undefined ? 'None' : to}
+segments = []
+for it in each(t.GetItemListInTrack('video', ${matchTrack})):
+    segments.append((it.GetStart(), it.GetEnd(), s(it.GetName())))
+checked = 0
+covered = 0
+offsets = 0
+missing = 0
+for it in each(t.GetItemListInTrack('video', ${targetTrack})):
+    start = it.GetStart()
+    end = it.GetEnd()
+    if (from_ is not None and end <= from_) or (to_ is not None and start >= to_):
+        continue
+    name = s(it.GetName())
+    best = None
+    for seg in segments:
+        if best is None or abs(seg[0] - start) < abs(best[0] - start):
+            best = seg
+    checked = checked + 1
+    delta = None
+    verdict = 'no-segment'
+    segment_name = ''
+    segment_start = None
+    segment_end = None
+    if best is not None:
+        segment_name = best[2]
+        segment_start = best[0]
+        segment_end = best[1]
+        delta = start - best[0]
+        if delta == 0:
+            verdict = 'covered'
+            covered = covered + 1
+        else:
+            verdict = 'offset'
+            offsets = offsets + 1
+    else:
+        missing = missing + 1
+    if checked <= ${MAX_LISTED_ITEMS}:
+        print('check_' + str(checked) + '_name=' + name)
+        print('check_' + str(checked) + '_start=' + s(start))
+        print('check_' + str(checked) + '_end=' + s(end))
+        print('check_' + str(checked) + '_segment=' + segment_name)
+        print('check_' + str(checked) + '_seg_start=' + s(segment_start))
+        print('check_' + str(checked) + '_seg_end=' + s(segment_end))
+        print('check_' + str(checked) + '_delta=' + s(delta))
+        print('check_' + str(checked) + '_verdict=' + verdict)
+print('check_count=' + str(checked))
+print('match_track=' + str(${matchTrack}))
+print('target_track=' + str(${targetTrack}))
+print('checked=' + str(checked))
+print('covered=' + str(covered))
+print('offset=' + str(offsets))
+print('missing=' + str(missing))
+`
+}
+
+/**
+ * Body positioning one deliverable on V2 through the Edit page UI. Resolve's
+ * scripting surface cannot insert at a record frame, so this body selects the
+ * media-pool clip, seeks the playhead, clicks "Place On Top" through System
+ * Events, then reads the landing back and rolls back every arrival when the
+ * result is not exactly V2 at the requested frame.
+ *
+ * Preflight is fail-closed: V1 must have content over the landing frame (so
+ * "Place On Top" has a layer to sit above) and every track from V2 upward must
+ * be free over the deliverable's range, which makes the landing deterministic.
+ * The UI chain needs macOS Accessibility/Automation permission for the DSH host
+ * app and Resolve frontmost; a denied or failed UI step rolls back and reports
+ * it instead of leaving a stray clip.
+ * @param request - the placement coordinates plus the Resolve `.app` path.
+ * @returns Python source for `pythonScriptOf`, routed through `run_script_unsafe`.
+ */
+export function placeUiPython(request: DavinciUiPlacementRequest): string {
+  return `
+import os
+import subprocess
+import time
+
+t = current_timeline()
+if t is None:
+    return
+if ${request.trackIndex} != 2:
+    print('ERROR placement-blocked: UI placement currently supports video track 2 only')
+    return
+fps = timeline_fps()
+if fps is None:
+    print('ERROR api-failed: could not read timelineFrameRate to position the playhead')
+    return
+folder, missing = find_bin(${JSON.stringify(request.bin)})
+if folder is None:
+    print('ERROR bin-not-found: ' + s(missing))
+    return
+
+def clip_frames(item):
+    try:
+        value = float(s(item.GetClipProperty('Frames') or ''))
+    except (TypeError, ValueError):
+        return 0
+    return int(value) if value > 0 else 0
+
+target = None
+for c in each(folder.GetClipList()):
+    if s(c.GetName()) == ${JSON.stringify(request.clipName)}:
+        target = c
+        break
+if target is None:
+    print('ERROR clip-not-found: no clip named ' + ${JSON.stringify(request.clipName)} + ' in bin ' + ${JSON.stringify(request.bin)})
+    return
+frames = clip_frames(target)
+if frames <= 0:
+    print('ERROR api-failed: could not read the deliverable length; refusing a UI placement without a known range')
+    return
+record_frame = ${request.recordFrame}
+end_frame = record_frame + frames
+
+# V1 must have content at the playhead, or "Place On Top" would land on V1.
+on_match = False
+for it in each(t.GetItemListInTrack('video', 1)):
+    if it.GetStart() <= record_frame < it.GetEnd():
+        on_match = True
+        break
+if not on_match:
+    print('ERROR placement-blocked: V1 has no segment covering frame ' + s(record_frame) + '; Place On Top would land on V1, not V2')
+    return
+
+# Every track from V2 upward must be free over the deliverable range, which is
+# what makes "Place On Top" land on V2.
+video_tracks = int(t.GetTrackCount('video'))
+for ti in range(2, video_tracks + 1):
+    for it in each(t.GetItemListInTrack('video', ti)):
+        if not (it.GetEnd() <= record_frame or it.GetStart() >= end_frame):
+            print('ERROR placement-blocked: video track ' + str(ti) + ' already has ' + s(it.GetName()) + ' [' + s(it.GetStart()) + '-' + s(it.GetEnd()) + '] over the target range [' + str(record_frame) + '-' + str(end_frame) + ']; delete or move it first')
+            return
+
+pre_items = {}
+for kind in ('video', 'audio'):
+    for ti in range(1, int(t.GetTrackCount(kind)) + 1):
+        for it in each(t.GetItemListInTrack(kind, ti)):
+            key = (kind, ti, it.GetStart(), it.GetEnd(), s(it.GetName()))
+            pre_items[key] = pre_items.get(key, 0) + 1
+
+def rollback_appended():
+    doomed = []
+    for kind in ('video', 'audio'):
+        for ti in range(1, int(t.GetTrackCount(kind)) + 1):
+            for it in each(t.GetItemListInTrack(kind, ti)):
+                key = (kind, ti, it.GetStart(), it.GetEnd(), s(it.GetName()))
+                if pre_items.get(key, 0) > 0:
+                    pre_items[key] = pre_items[key] - 1
+                else:
+                    doomed.append(it)
+    return t.DeleteClips(doomed) if doomed else True
+
+if hasattr(resolve, 'OpenPage'):
+    try:
+        resolve.OpenPage('edit')
+    except Exception:
+        pass
+try:
+    pool.SetSelectedClip(target)
+except Exception:
+    print('ERROR api-failed: MediaPool:SetSelectedClip failed; the deliverable cannot be loaded for a UI edit')
+    return
+t.SetCurrentTimecode(frames_to_tc(record_frame, fps))
+try:
+    subprocess.run(['open', ${JSON.stringify(request.appPath)}], check=True, timeout=10)
+except Exception:
+    removed = rollback_appended()
+    print('rolled_back=' + s(removed is True))
+    print('ERROR api-failed: could not activate DaVinci Resolve; nothing was placed')
+    return
+time.sleep(0.8)
+applescript = ${JSON.stringify(PLACE_ON_TOP_APPLESCRIPT)}
+result = subprocess.run(['osascript', '-e', applescript], capture_output=True, timeout=20)
+time.sleep(1.0)
+if result.returncode != 0:
+    removed = rollback_appended()
+    detail = (result.stderr or b'').decode('utf-8', 'replace').strip()[-300:]
+    print('rolled_back=' + s(removed is True))
+    print('ERROR api-failed: the UI edit could not be driven (osascript exit ' + str(result.returncode) + '): ' + detail + ' - grant Accessibility/Automation permission to the DSH host app and keep Resolve frontmost; every item added by the call was rolled back')
+    return
+landed = None
+for it in each(t.GetItemListInTrack('video', 2)):
+    if s(it.GetName()) == ${JSON.stringify(request.clipName)} and it.GetStart() == record_frame:
+        landed = it
+        break
+if landed is None:
+    removed = rollback_appended()
+    print('rolled_back=' + s(removed is True))
+    print('ERROR api-failed: the UI edit ran but no ' + ${JSON.stringify(request.clipName)} + ' appeared on V2 at frame ' + s(record_frame) + '; verify the Source Viewer shows the deliverable and Accessibility is granted - every item added by the call was rolled back')
+    return
+print('landed_track=2')
+print('landed_start=' + s(landed.GetStart()))
+print('landed_end=' + s(landed.GetEnd()))
+print('done=true')
 `
 }
 

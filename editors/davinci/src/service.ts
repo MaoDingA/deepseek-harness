@@ -21,6 +21,9 @@ import {
   loadRenderPresetPython,
   mediaPoolPython,
   placePython,
+  placeUiPython,
+  placementCheckPython,
+  placementPlanPython,
   projectInfoPython,
   pythonScriptOf,
   renderPresetsPython,
@@ -42,6 +45,8 @@ import {
   mediaPoolFrom,
   mutationFrom,
   parseOutput,
+  placementCheckFrom,
+  placementPlanFrom,
   projectInfoFrom,
   renderingControlFrom,
   renderPresetsFrom,
@@ -62,6 +67,8 @@ import type {
   DavinciMarkerRequest,
   DavinciMediaPoolInfo,
   DavinciMutationInfo,
+  DavinciPlacementCheckInfo,
+  DavinciPlacementPlanInfo,
   DavinciPlaceRequest,
   DavinciProjectInfo,
   DavinciRenderingControlRequest,
@@ -76,6 +83,7 @@ import type {
   DavinciSpec,
   DavinciTimelineItemsInfo,
   DavinciTimelineSwitchInfo,
+  DavinciUiPlacementRequest,
 } from './types.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -242,6 +250,91 @@ export abstract class DavinciService extends Service {
    */
   async place(placement: DavinciPlaceRequest, request: DavinciCallRequest = {}): Promise<DavinciResult<DavinciMutationInfo>> {
     return this.run(placePython(placement), request, (fields) => mutationFrom(fields, 'AppendToTimeline'))
+  }
+
+  /**
+   * Plan a VFX layup without changing anything: for each deliverable in a bin
+   * (or one named deliverable), match its source Start TC to a segment on
+   * `matchTrack`, compute the landing record frame from the offset inside that
+   * segment, and report whether `targetTrack` and every track above it are free
+   * over the deliverable's range.
+   * @param bin - bin path holding the deliverables; empty string is the root.
+   * @param clipName - one deliverable name, or undefined for the whole bin.
+   * @param matchTrack - 1-based video track whose source TC range is matched.
+   * @param targetTrack - 1-based video track the deliverable would land on.
+   * @param request - call envelope.
+   * @returns the plan rows or a coded failure.
+   */
+  async placementPlan(
+    bin: string,
+    clipName: string | undefined,
+    matchTrack: number,
+    targetTrack: number,
+    request: DavinciCallRequest = {},
+  ): Promise<DavinciResult<DavinciPlacementPlanInfo>> {
+    return this.run(
+      placementPlanPython(bin, clipName, matchTrack, targetTrack),
+      request,
+      (fields) => ({ ok: true, data: placementPlanFrom(fields) }),
+    )
+  }
+
+  /**
+   * Structurally check a VFX layup: for each item on `targetTrack`, compare its
+   * start with the closest `matchTrack` segment start and report covered,
+   * offset, or no-segment.
+   * @param matchTrack - 1-based video track holding the picture cut.
+   * @param targetTrack - 1-based video track holding the placed deliverables.
+   * @param from - optional record-frame lower bound for the target items.
+   * @param to - optional record-frame upper bound for the target items.
+   * @param request - call envelope.
+   * @returns the check rows and counts, or a coded failure.
+   */
+  async placementCheck(
+    matchTrack: number,
+    targetTrack: number,
+    from: number | undefined,
+    to: number | undefined,
+    request: DavinciCallRequest = {},
+  ): Promise<DavinciResult<DavinciPlacementCheckInfo>> {
+    return this.run(
+      placementCheckPython(matchTrack, targetTrack, from, to),
+      request,
+      (fields) => ({ ok: true, data: placementCheckFrom(fields) }),
+    )
+  }
+
+  /**
+   * Position one deliverable on V2 through the Edit page UI. The scripting
+   * surface cannot insert at a record frame, so this runs the placement body
+   * through `run_script_unsafe`: preflight (V1 content at the landing frame,
+   * V2 and above free), select the media-pool clip, seek, click "Place On Top",
+   * then read the landing back and roll back every arrival when it is not
+   * exactly V2 at the requested frame.
+   * @param placement - the placement coordinates plus the Resolve `.app` path.
+   * @param envelope - call envelope.
+   * @returns the mutation outcome or a coded failure.
+   */
+  async placeUi(placement: DavinciUiPlacementRequest, envelope: DavinciCallRequest = {}): Promise<DavinciResult<DavinciMutationInfo>> {
+    let spec: DavinciSpec
+    try {
+      spec = this.resolve(envelope)
+    } catch (error) {
+      const failure = classifySpawnError(error)
+      return { ok: false, code: failure.code, message: failure.message }
+    }
+    let raw: string
+    try {
+      raw = await this.evalScript(pythonScriptOf(placeUiPython(placement)), spec, envelope.signal, 'run_script_unsafe')
+    } catch (error) {
+      const failure = classifySpawnError(error)
+      return { ok: false, code: failure.code, message: failure.message }
+    }
+    const parsed = parseOutput(raw)
+    if (parsed.status === 'error') {
+      return { ok: false, code: parsed.code, message: parsed.message }
+    }
+    return mutationFrom(parsed.fields, 'PlaceOnTop')
   }
 
   /**

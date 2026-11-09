@@ -1,15 +1,16 @@
 /**
- * Model-facing Consumer surface of the `ctx.davinci` seam: the nineteen
+ * Model-facing Consumer surface of the `ctx.davinci` seam: the twenty-two
  * `resolve_*` tools (project info, media pool, timeline items, find-by-tc,
- * find-clip, seek, screenshot, switch-timeline, place, delete, marker, audio
- * items, render status, render presets, add-render-job, load/delete render
- * jobs, render control) plus the system-prompt section teaching the editing
- * conventions. Mutating tools gate through the approval seam before anything
- * executes — the approval prompt is how the user consents.
+ * find-clip, seek, screenshot, switch-timeline, place, place-ui, delete,
+ * marker, audio items, render status, render presets, add/load/delete render
+ * jobs, render control, placement plan, and placement check) plus the
+ * system-prompt section teaching the editing conventions. Mutating tools gate
+ * through the approval seam before anything executes — the approval prompt is
+ * how the user consents.
  * @module @deepseek-ai/dsh-davinci/tools
  */
 
-import { isAbsolute, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -26,6 +27,8 @@ import type {
   DavinciFindByTcInfo,
   DavinciMediaPoolInfo,
   DavinciMutationInfo,
+  DavinciPlacementCheckInfo,
+  DavinciPlacementPlanInfo,
   DavinciProjectInfo,
   DavinciRenderJobInfo,
   DavinciRenderPresetsInfo,
@@ -98,13 +101,12 @@ const RESOLVE_SECTION = `DaVinci Resolve editing conventions:
 - Timeline tools operate on the timeline current in Resolve; use resolve_switch_timeline (1-based index or exact name from resolve_project_info) to change which timeline they target.
 - Frame math uses the current timeline's fps; convert timecodes to frames with that fps before comparing positions.
 - To match a VFX deliverable to its timeline segment, prefer resolve_find_by_tc with the deliverable's source Start TC over paging resolve_timeline_items.
-- Group vocabulary (this show's delivery vocabulary, inferred from the running project):
-  - 套片 (sao pian) = two sub-flows:
-    a. 音画合套 (audio-picture conformance): the show ships picture cut as separate V1 segments (camcorder MXFs) plus one long audio delivery (SOUNDS/*.wav, roughly one episode of final mix). The picture segments are already on V1; the 套片 step is (1) confirming the A1 delivery covers each V1 segment frame-accurately and (2) flagging any V1 segment whose picture does not line up with the A1 mix (typically a scene re-cut after the mix was finalized). Read the A1 items first with resolve_audio_timeline_items and compare against V1 with resolve_timeline_items; resolve_find_by_tc is the TC-side match when the A1 has a continuous Start TC.
-    b. 嵌套组装 (nested assembly): the show ships the cut as a nested timeline (a timeline named after the delivery date, e.g. "EP04_20260129", imported into a parent timeline as a single item on V1). 套片 in this form = "place the nested timeline onto the parent timeline at the right record frame". Use resolve_place_clip with the TL bin (nested-timeline items live there) or a fresh nested clip from SOUNDS as the picture; use resolve_delete_item / resolve_add_marker when cleaning stray duplicates.
-  - 贴视效 (tie shi xiao) = paste VFX deliverables (VFX/*.mov, e.g. ZY_EP05_1630_CMP_v002.mov) from the VFX bin onto V2 aligned to the matching V1 segment's start frame (the V2-paste convention already encoded in resolve_place_clip's description). The deliverable's source Start TC is the matching anchor; prefer resolve_find_by_tc over paging.
-  - 输出 (shu chu) = the render-queue flow: confirm current render settings with resolve_render_status (live job/render flag, current format/codec, preset+format counts), inspect the selectable preset list with resolve_render_presets (empty when this build exposes none), switch the active preset with resolve_load_render_preset (name must match a resolve_render_presets entry), enqueue the current timeline with resolve_add_render_job (returns the job's id, marked 读回确认 when resolved by queue read-back), cancel a queued job with resolve_delete_render_job (by its id), start with resolve_start_rendering, and stop with resolve_stop_rendering. Changing the active format/codec requires the Deliver page or a script outside this plugin.
-- Mutating tools (place/delete/marker/render-queue/render-control) are approval-gated one-shot: the approval prompt is how the user consents, so never detour through chat to ask permission first, and never retry a rejected mutation unchanged.
+- Business terms (confirmed with the user; project conventions vary, so ask before assuming):
+  - 套片 (conform): rebuild each reel (本) from the editor's locked workprint against the original camera source, on V1. One timeline per reel, leader at the head, reel-local hour TC. Audio is not part of this step: source clips may carry linked audio tracks, but do not judge or re-time sound unless the user asks. A shot may be built from several source segments (multiple time ranges of the same clip), so compare frame ranges rather than assuming one clip covers one shot.
+  - 贴视效 (VFX layup): project-specific. Before planning, ask the user for the deliverable bin, naming/TC convention, target track (default V2), handles, and whether to replace or overlay; then resolve_plan_vfx_placement -> resolve_place_clip_ui -> resolve_verify_placement. resolve_place_clip only appends to the tail and rolls back; do not use it for positioned layups.
+  - 输出 (output): project-specific. Before enqueuing, ask the user for the deliverable format/codec or preset, target directory, naming, per-reel vs master, leader inclusion, and the QC checklist; then confirm with resolve_render_status / resolve_render_presets and use the render tools.
+  - Never guess a project convention. If it is not already in the conversation, ask the user with ask_user_question; when no user channel exists (headless), stop and report the missing conventions instead of guessing. State any default you use explicitly.
+- Mutating tools (place/place-ui/delete/marker/render-queue/render-control) are approval-gated one-shot: the approval prompt is how the user consents, so never detour through chat to ask permission first, and never retry a rejected mutation unchanged.
 - After any mutation, re-read the affected state with resolve_timeline_items or resolve_render_status to confirm the result before reporting success.`
 
 function resultText<T>(result: DavinciResult<T>, format: (data: T) => string): string {
@@ -150,6 +152,17 @@ function toolDeadlineMs(budgetMs: number): number {
 function screenshotDirectory(exec: Pick<ToolRunContext, 'agent'>, configured: string): string {
   if (isAbsolute(configured)) return configured
   return join(exec.agent?.session.header.cwd ?? process.cwd(), configured)
+}
+
+/**
+ * Derive the Resolve `.app` bundle path from the configured or discovered
+ * ResolveMCP binary (`<app>/Contents/Applications/ResolveMCP`).
+ * @param config - plugin config.
+ * @returns the absolute app path, or undefined when no install is found.
+ */
+function resolveAppPath(config: Config): string | undefined {
+  const mcp = config.resolveMcpPath ?? discoverResolveMcp(config.applicationsDir ?? '/Applications')
+  return mcp === undefined ? undefined : dirname(dirname(dirname(mcp)))
 }
 
 function projectInfoText(info: DavinciProjectInfo): string {
@@ -206,6 +219,36 @@ function findClipText(info: DavinciFindClipInfo): string {
   if (info.hitTotal > info.hits.length) {
     lines.push(`(showing ${info.hits.length} of ${info.hitTotal} hits — use a narrower name)`)
   }
+  return lines.join('\n')
+}
+
+function placementPlanText(info: DavinciPlacementPlanInfo): string {
+  const lines = info.entries.map((entry) => {
+    const segment = entry.segmentName === undefined
+      ? 'no segment'
+      : `${entry.segmentName} [${entry.segmentRecordStart ?? '?'}-${entry.segmentRecordEnd ?? '?'}]`
+    const target = entry.landingFrame === undefined
+      ? '-'
+      : `${entry.landingFrame}-${entry.targetEndFrame ?? '?'}`
+    const overhang = entry.overhangFrames === undefined
+      ? ''
+      : ` overhang=${entry.overhangFrames > 0 ? '+' : ''}${entry.overhangFrames}`
+    const conflicts = entry.conflicts.length > 0 ? ` conflicts=${entry.conflicts.join(', ')}` : ''
+    return `plan: ${entry.clipName}  tc=${entry.sourceTc} frames=${entry.frames}  V${info.matchTrack}=${segment}  -> V${info.targetTrack} ${target}${overhang}  ${entry.verdict}${conflicts}`
+  })
+  const ready = info.entries.filter((entry) => entry.verdict === 'ready').length
+  lines.push(`fps=${info.fps} scanned=${info.scanned} shown=${info.entries.length} ready=${ready}`)
+  if (info.scanned > info.entries.length) lines.push('(plan truncated — name one deliverable to keep the output short)')
+  return lines.join('\n')
+}
+
+function placementCheckText(info: DavinciPlacementCheckInfo): string {
+  const lines = info.entries.map((entry) =>
+    `check: ${entry.targetName}  V${info.targetTrack} [${entry.targetStart}-${entry.targetEnd}]  `
+    + `segment=${entry.segmentName ?? '?'} [${entry.segmentStart ?? '?'}-${entry.segmentEnd ?? '?'}]  `
+    + `delta=${entry.deltaFrames ?? '?'}  ${entry.verdict}`)
+  lines.push(`checked=${info.checked} covered=${info.covered} offset=${info.offset} missing=${info.missing}`)
+  if (info.checked > info.entries.length) lines.push('(check truncated — narrow the from/to window)')
   return lines.join('\n')
 }
 
@@ -473,6 +516,97 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
           { bin: args.bin, clipName: args.clipName, trackIndex: args.trackIndex, recordFrame: args.recordFrame },
           callEnvelope(exec, scanBudgetMs),
         ),
+        mutationText,
+      )
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'resolve_plan_vfx_placement',
+    description:
+      'Read-only VFX layup plan: for every deliverable in a media-pool bin (or one named deliverable), match its source Start TC to a segment on the match track, compute the landing record frame and target range, and report ready / no-match / occupied. Start here before any paste.',
+    parameters: {
+      bin: { type: 'string', required: true, description: 'Bin path holding the VFX deliverables, e.g. "VFX/20260702"' },
+      clipName: { type: 'string', description: 'One deliverable name; omit to plan the whole bin' },
+      matchTrack: { type: 'number', description: '1-based video track holding the picture cut (default 1)' },
+      targetTrack: { type: 'number', description: '1-based video track for the deliverables (default 2)' },
+    },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    timeoutMs: scanDeadlineMs,
+    async execute(args, exec) {
+      return resultText(
+        await ctx.davinci.placementPlan(
+          args.bin,
+          args.clipName,
+          args.matchTrack ?? 1,
+          args.targetTrack ?? 2,
+          callEnvelope(exec, scanBudgetMs),
+        ),
+        placementPlanText,
+      )
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'resolve_verify_placement',
+    description:
+      'Read-only structural QC of a VFX layup: for each item on the target track, compare its start with the closest match-track segment start and report covered / offset / no-segment. Use after pasting (or after a manual paste) to confirm every deliverable sits on its shot.',
+    parameters: {
+      matchTrack: { type: 'number', description: '1-based video track holding the picture cut (default 1)' },
+      targetTrack: { type: 'number', description: '1-based video track holding the deliverables (default 2)' },
+      from: { type: 'number', description: 'Record frame lower bound for the checked items' },
+      to: { type: 'number', description: 'Record frame upper bound for the checked items' },
+    },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    timeoutMs: scanDeadlineMs,
+    async execute(args, exec) {
+      return resultText(
+        await ctx.davinci.placementCheck(
+          args.matchTrack ?? 1,
+          args.targetTrack ?? 2,
+          args.from,
+          args.to,
+          callEnvelope(exec, scanBudgetMs),
+        ),
+        placementCheckText,
+      )
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'resolve_place_clip_ui',
+    description:
+      'Position a deliverable at a record frame on V2 by driving the Edit page UI (Resolve\'s scripting surface cannot insert at a frame). Requires V1 content at the landing frame and a free V2 and above over the deliverable range; it selects the clip, seeks, clicks "Place On Top", verifies the landing, and rolls back on any mismatch. Requires macOS Accessibility/Automation permission for the DSH host app and a frontmost Resolve; fails closed and changes nothing when the UI step is denied. Approval-gated: the approval prompt is how the user consents — do not ask in chat first.',
+    parameters: {
+      bin: { type: 'string', required: true, description: 'Bin path of the deliverable, e.g. "VFX/20260702"' },
+      clipName: { type: 'string', required: true, description: 'Exact deliverable name in the bin' },
+      recordFrame: { type: 'number', required: true, description: 'Record frame where the deliverable starts on V2' },
+      trackIndex: { type: 'number', description: 'Video track to land on; only V2 is supported (default 2)' },
+    },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    timeoutMs: scanDeadlineMs,
+    async execute(args, exec) {
+      if ((args.trackIndex ?? 2) !== 2) {
+        throw new Error('resolve_place_clip_ui currently supports video track 2 only; nothing was changed')
+      }
+      const appPath = resolveAppPath(config)
+      if (appPath === undefined) {
+        throw new Error('resolve_place_clip_ui needs the DaVinci Resolve .app path — set resolveMcpPath in config; nothing was changed')
+      }
+      await requireWriteApproval({
+        approval: ctx.get('approval'),
+        preApproved: config.autoApproveMutations,
+        exec,
+        reason: `place "${args.clipName}" from ${args.bin} on V2 at record frame ${args.recordFrame} via the Edit page UI (Place On Top)`,
+      })
+      return resultText(
+        await ctx.davinci.placeUi({
+          bin: args.bin,
+          clipName: args.clipName,
+          trackIndex: 2,
+          recordFrame: args.recordFrame,
+          appPath,
+        }, callEnvelope(exec, scanBudgetMs)),
         mutationText,
       )
     },

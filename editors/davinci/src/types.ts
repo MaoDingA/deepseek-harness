@@ -53,6 +53,7 @@ export type DavinciFailureCode =
   | 'ambiguous-job'
   | 'preset-not-found'
   | 'bad-tc'
+  | 'placement-blocked'
   | 'api-failed'
   | 'spawn-failed'
   | 'timeout'
@@ -179,6 +180,73 @@ export interface DavinciPlaceRequest {
   readonly clipName: string
   readonly trackIndex: number
   readonly recordFrame: number
+}
+
+/** One deliverable in the VFX placement plan. */
+export interface DavinciPlacementPlanEntry {
+  readonly clipName: string
+  /** Deliverable source Start TC (`HH:MM:SS:FF`), as the host reports it. */
+  readonly sourceTc: string
+  /** Deliverable length in frames; 0 when the host could not read it. */
+  readonly frames: number
+  /** The matched source-timeline segment, when the source TC falls inside one. */
+  readonly segmentName: string | undefined
+  readonly segmentRecordStart: number | undefined
+  readonly segmentRecordEnd: number | undefined
+  /** Record frame where the deliverable belongs on the target track. */
+  readonly landingFrame: number | undefined
+  /** Record frame where the placed deliverable would end. */
+  readonly targetEndFrame: number | undefined
+  /**
+   * Deliverable end minus segment end: positive means the deliverable extends
+   * past the shot (handles or a longer version), negative means it is shorter.
+   */
+  readonly overhangFrames: number | undefined
+  /** `ready` when matched and the target range is free; otherwise the blocker. */
+  readonly verdict: 'ready' | 'no-match' | 'occupied'
+  /** Existing items that block the target range, as `name Vx [start-end]`. */
+  readonly conflicts: readonly string[]
+}
+
+/** Result of planning a VFX layup from one bin against the current timeline. */
+export interface DavinciPlacementPlanInfo {
+  readonly fps: number
+  readonly matchTrack: number
+  readonly targetTrack: number
+  /** Deliverables examined in the bin (or the named subset). */
+  readonly scanned: number
+  readonly entries: readonly DavinciPlacementPlanEntry[]
+}
+
+/** One placed deliverable compared with its source-timeline segment. */
+export interface DavinciPlacementCheckEntry {
+  readonly targetName: string
+  readonly targetStart: number
+  readonly targetEnd: number
+  /** Closest segment on the match track, by start frame. */
+  readonly segmentName: string | undefined
+  readonly segmentStart: number | undefined
+  readonly segmentEnd: number | undefined
+  /** `targetStart - segmentStart`; 0 means aligned, undefined without a segment. */
+  readonly deltaFrames: number | undefined
+  readonly verdict: 'covered' | 'offset' | 'no-segment'
+}
+
+/** Structural QC of items on the target track against the match track. */
+export interface DavinciPlacementCheckInfo {
+  readonly matchTrack: number
+  readonly targetTrack: number
+  readonly checked: number
+  readonly covered: number
+  readonly offset: number
+  readonly missing: number
+  readonly entries: readonly DavinciPlacementCheckEntry[]
+}
+
+/** UI-automation placement request: a positioned VFX layup on V2. */
+export interface DavinciUiPlacementRequest extends DavinciPlaceRequest {
+  /** Absolute `.app` path activated before the UI edit is driven. */
+  readonly appPath: string
 }
 
 /** Deletion request: the video-track item that starts exactly at a frame. */

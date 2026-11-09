@@ -14,6 +14,10 @@ import {
   loadRenderPresetPython,
   mediaPoolPython,
   placePython,
+  placeUiPython,
+  placementCheckPython,
+  placementPlanPython,
+  PLACE_ON_TOP_APPLESCRIPT,
   projectInfoPython,
   PYTHON_PRELUDE,
   pythonScriptOf,
@@ -131,6 +135,39 @@ describe('place and delete body generation', () => {
     // printing the ERROR line the protocol layer parses.
     expect(body).toContain('+ str(12345) + ')
     expect(body).toContain('+ str(1))')
+  })
+
+  it('computes a VFX landing frame from the offset inside the matched segment', () => {
+    const body = placementPlanPython('VFX/20260702', 'shot_010.mov', 1, 2)
+    expect(body).toContain('offset = source_start - segment[1]')
+    expect(body).toContain('landing = segment[0].GetStart() + offset')
+    expect(body).toContain('verdict = \'occupied\' if conflicts else \'ready\'')
+    expect(body).toContain("print('plan_count=' + str(plans))")
+  })
+
+  it('compares each target item start with the closest match-track segment start', () => {
+    const body = placementCheckPython(1, 2, 100, 900)
+    expect(body).toContain('delta = start - best[0]')
+    expect(body).toContain("verdict = 'covered'")
+    expect(body).toContain("print('check_count=' + str(checked))")
+  })
+
+  it('drives Place On Top through System Events and rolls back when the landing is wrong', () => {
+    const body = placeUiPython({
+      bin: 'VFX/20260702',
+      clipName: 'shot_010.mov',
+      trackIndex: 2,
+      recordFrame: 500,
+      appPath: '/Applications/DaVinci Resolve21/DaVinci Resolve.app',
+    })
+    expect(body).toContain('resolve.OpenPage(\'edit\')')
+    expect(body).toContain('pool.SetSelectedClip(target)')
+    expect(body).toContain('osascript')
+    expect(body).toContain('Place On Top')
+    expect(body).toContain('pre_items')
+    expect(body).toContain("ERROR placement-blocked:")
+    expect(body).toContain('rollback_appended()')
+    expect(PLACE_ON_TOP_APPLESCRIPT).toContain('click foundItem')
   })
 })
 
@@ -313,6 +350,10 @@ describe('generated Python compiles', () => {
       switchTimelinePython(2, undefined),
       switchTimelinePython(undefined, 'Main'),
       placePython({ bin: 'VFX/20260702', clipName: 'shot_010.mov', trackIndex: 2, recordFrame: 500 }),
+      placementPlanPython('VFX/20260702', 'shot_010.mov', 1, 2),
+      placementPlanPython('VFX/20260702', undefined, 1, 2),
+      placementCheckPython(1, 2, undefined, undefined),
+      placeUiPython({ bin: 'VFX/20260702', clipName: 'shot_010.mov', trackIndex: 2, recordFrame: 500, appPath: '/Applications/DaVinci Resolve21/DaVinci Resolve.app' }),
       deleteItemPython({ trackIndex: 1, startFrame: 500 }),
       audioTimelineItemsPython(1, undefined, 73862),
       renderStatusPython(),
