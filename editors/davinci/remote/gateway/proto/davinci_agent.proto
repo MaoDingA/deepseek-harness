@@ -1,0 +1,36 @@
+syntax = "proto3";
+package davinci.agent.v1;
+
+service DavinciAgent {
+  // One agent turn. Server-streaming: status/tool/message events followed by
+  // exactly one final or error event, then the stream closes.
+  rpc RunTask (RunTaskRequest) returns (stream RunTaskEvent);
+  rpc Health (HealthRequest) returns (HealthResponse);
+}
+
+message RunTaskRequest {
+  string prompt = 1;
+  // Empty means a new SDK session. A non-empty id is echoed back but is not
+  // resumable yet (the gateway spawns one runtime per turn for now).
+  string session_id = 2;
+  // "20" or "21"; empty defaults to "21".
+  string resolve_version = 3;
+  // Optional project hint for logging/context (for example "FEATURE").
+  string project = 4;
+}
+
+message RunTaskEvent {
+  // started | message | status | final | error
+  string type = 1;
+  string session_id = 2;
+  // Assistant text for message/final; diagnostic for error.
+  string text = 3;
+  // JSON-encoded payload for future tool/status detail.
+  string data_json = 4;
+}
+
+message HealthRequest {}
+message HealthResponse {
+  bool ok = 1;
+  string detail = 2;
+}
