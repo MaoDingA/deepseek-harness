@@ -28,6 +28,8 @@ import type {
   DavinciResult,
   DavinciSeekInfo,
   DavinciTcHitInfo,
+  DavinciTimelineBeginInfo,
+  DavinciTimelineFinalizeInfo,
   DavinciTimelineItemInfo,
   DavinciTimelineItemsInfo,
   DavinciTimelineSwitchInfo,
@@ -614,4 +616,57 @@ export function innerResponseToRaw(tool: string, text: string): string {
 function lastExceptionLine(trace: string): string {
   const lines = trace.split('\n').filter((line) => line.trim() !== '')
   return lines[lines.length - 1] ?? trace
+}
+
+/**
+ * Project the duplicate-current-timeline body. `done=false` means the copy was
+ * rolled back or never created, so the caller must not treat it as a working
+ * copy.
+ * @param fields - parsed kv fields from the begin body.
+ * @returns the original/working names and frame ranges, or a coded failure.
+ */
+export function beginTimelineEditFrom(fields: ReadonlyMap<string, string>): DavinciResult<DavinciTimelineBeginInfo> {
+  const done = fields.get('done') === 'true'
+  if (!done) {
+    return { ok: false, code: 'api-failed', message: 'the timeline working copy was not created; no edit should start' }
+  }
+  return {
+    ok: true,
+    data: {
+      originalName: text(fields, 'original_name') ?? '',
+      workingName: text(fields, 'working_name') ?? '',
+      originalStartFrame: numeric(fields, 'original_start'),
+      originalEndFrame: numeric(fields, 'original_end'),
+      workingStartFrame: numeric(fields, 'working_start'),
+      workingEndFrame: numeric(fields, 'working_end'),
+      done,
+    },
+  }
+}
+
+/**
+ * Project the finalize body. A rejected review is a successful no-op
+ * (`approved=false`, `done=false`); an approved review that did not complete is
+ * an `api-failed` failure.
+ * @param fields - parsed kv fields from the finalize body.
+ * @returns the final names, approval state, and any manual-disable warning.
+ */
+export function finalizeTimelineEditFrom(fields: ReadonlyMap<string, string>): DavinciResult<DavinciTimelineFinalizeInfo> {
+  const approved = fields.get('approved') === 'true'
+  const done = fields.get('done') === 'true'
+  if (approved && !done) {
+    return { ok: false, code: 'api-failed', message: 'the approved timeline edit did not complete; names were rolled back' }
+  }
+  return {
+    ok: true,
+    data: {
+      approved,
+      done,
+      originalName: text(fields, 'original_name') ?? '',
+      workingName: text(fields, 'working_name') ?? '',
+      backupName: text(fields, 'backup_name'),
+      originalDisabled: fields.get('original_disabled') === 'true',
+      warning: text(fields, 'warning'),
+    },
+  }
 }

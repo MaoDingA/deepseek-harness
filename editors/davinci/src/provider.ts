@@ -58,6 +58,12 @@ export interface Config {
    */
   readonly screenshotDir?: string
   /**
+   * Root directory for per-project conventions documents; one
+   * `<project>.json` per project. Defaults to `$DSH_HOME/davinci/projects`
+   * (`~/.dsh/davinci/projects` when `DSH_HOME` is unset).
+   */
+  readonly conventionsDir?: string
+  /**
    * Deployment-owned pre-approval for this plugin's mutations: skips the
    * interactive approval gate for resolve_* writes only. The default keeps
    * every mutation fail-closed; enabling it is an explicit deployment
@@ -74,10 +80,23 @@ export const davinciConfigSchema: z<Config> = z.object({
   defaultTimeoutMs: z.number().default(30_000),
   maxTimeoutMs: z.number().default(60_000),
   screenshotDir: z.string().default('.resolve-agent'),
+  conventionsDir: z.string().default(defaultConventionsDir()),
   autoApproveMutations: z.boolean().default(false),
 })
 
 const DEFAULT_APPLICATIONS_DIR = '/Applications'
+
+/**
+ * Default conventions root under the Harness home: `$DSH_HOME/davinci/projects`
+ * with the same `~/.dsh` fallback the harness uses elsewhere. Resolved once when
+ * the config schema is built, so a deployment can still override the field.
+ * @returns the absolute default directory.
+ */
+export function defaultConventionsDir(): string {
+  const configured = process.env.DSH_HOME?.trim()
+  const home = configured !== undefined && configured !== '' ? configured : join(homedir(), '.dsh')
+  return join(home, 'davinci', 'projects')
+}
 
 function versionNumberOf(installName: string): number {
   const match = installName.match(/^DaVinci Resolve(\d*)$/)

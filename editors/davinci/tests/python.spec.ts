@@ -7,8 +7,10 @@ import {
   addMarkerPython,
   addRenderJobPython,
   audioTimelineItemsPython,
+  beginTimelineEditPython,
   deleteItemPython,
   deleteRenderJobPython,
+  finalizeTimelineEditPython,
   findByTcPython,
   findClipPython,
   loadRenderPresetPython,
@@ -28,6 +30,7 @@ import {
   startRenderingPython,
   stopRenderingPython,
   switchTimelinePython,
+  timelineEditStatePython,
   timelineItemsPython,
 } from '../src/python.ts'
 import { addRenderJobFrom, deleteRenderJobFrom, parseOutput } from '../src/protocol.ts'
@@ -334,6 +337,36 @@ describe('loadRenderPresetPython validation', () => {
   })
 })
 
+
+describe('timeline working-copy bodies', () => {
+  it('begins by duplicating, renaming with the review suffix, and switching', () => {
+    const body = beginTimelineEditPython('_待审')
+    expect(body).toContain('t.DuplicateTimeline()')
+    expect(body).toContain('copy.SetName(working)')
+    expect(body).toContain('project.SetCurrentTimeline(copy)')
+    expect(body).toContain('pool.DeleteTimelines([copy])')
+    expect(body).toContain('_待审')
+  })
+
+  it('reads the working-copy state and refuses a non-copy', () => {
+    const body = timelineEditStatePython('_待审')
+    expect(body).toContain('not a working copy')
+    expect(body).toContain('original_name')
+  })
+
+  it('finalizes by renaming both timelines and reporting the manual disable', () => {
+    const approved = finalizeTimelineEditPython(true, '_待审', '第一本__OLD_20261109_1823', true)
+    expect(approved).toContain('original.SetName(backup)')
+    expect(approved).toContain('t.SetName(original_name)')
+    expect(approved).toContain('禁用时间线')
+    expect(approved).toContain('original_disabled=false')
+    const rejected = finalizeTimelineEditPython(false, '_待审', 'unused', true)
+    expect(rejected).toContain('approved=false')
+    expect(rejected).toContain('done=false')
+    expect(rejected).toContain('if not approved:')
+  })
+})
+
 describe('generated Python compiles', () => {
   // Syntax-only (ast.parse, no execution): every body must be valid Python on
   // any machine that has a python3; skipped where python3 is absent.
@@ -349,6 +382,10 @@ describe('generated Python compiles', () => {
       seekPython(undefined, '00:00:04:00'),
       switchTimelinePython(2, undefined),
       switchTimelinePython(undefined, 'Main'),
+      beginTimelineEditPython('_待审'),
+      timelineEditStatePython('_待审'),
+      finalizeTimelineEditPython(true, '_待审', '第一本__OLD_20261109_1823', true),
+      finalizeTimelineEditPython(false, '_待审', 'unused', true),
       placePython({ bin: 'VFX/20260702', clipName: 'shot_010.mov', trackIndex: 2, recordFrame: 500 }),
       placementPlanPython('VFX/20260702', 'shot_010.mov', 1, 2),
       placementPlanPython('VFX/20260702', undefined, 1, 2),

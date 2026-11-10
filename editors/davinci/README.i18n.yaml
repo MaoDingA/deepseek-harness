@@ -8,27 +8,27 @@
 /deepseek-ai-dsh-davinci-editors-davinci/architecture:
   en: 6a6c4f98423ed946
   zh: da9f561f3fde5c67
-/deepseek-ai-dsh-davinci-editors-davinci/tool-surface-22-tools:
-  en: 3855b35d7d3681b8
-  zh: 82c61cdac6fd49c1
-/deepseek-ai-dsh-davinci-editors-davinci/tool-surface-22-tools/domain-terms-also-recorded-in-the-resolve-section-prompt-section:
+/deepseek-ai-dsh-davinci-editors-davinci/tool-surface-26-tools:
+  en: 5530e5fcce84639e
+  zh: d2ff5d0f7af0dbea
+/deepseek-ai-dsh-davinci-editors-davinci/tool-surface-26-tools/domain-terms-also-recorded-in-the-resolve-section-prompt-section:
   en: 917895ecdc4001b0
   zh: 57d19a734ff73aa7
-/deepseek-ai-dsh-davinci-editors-davinci/tool-surface-22-tools/domain-terms-also-recorded-in-the-resolve-section-prompt-section/project-conventions-ask-first:
+/deepseek-ai-dsh-davinci-editors-davinci/tool-surface-26-tools/domain-terms-also-recorded-in-the-resolve-section-prompt-section/project-conventions-ask-first:
   en: 8e664642843f8fc5
   zh: 44369fc6e0582fdc
 /deepseek-ai-dsh-davinci-editors-davinci/config-cordis-yml:
-  en: 982972f6f40e3684
-  zh: ac26f1f05a0c0d8b
+  en: 31ec15f4fa3bfac5
+  zh: 77f55e840866ab26
 /deepseek-ai-dsh-davinci-editors-davinci/mounting-and-running:
   en: 910ccf93e62a7982
   zh: 5f8b75b513c00ad7
 /deepseek-ai-dsh-davinci-editors-davinci/tests:
-  en: f980be07bbf96a41
-  zh: c926cbb7f8fc80a7
+  en: 2e0da42dd282416d
+  zh: 76faef11925b093d
 /deepseek-ai-dsh-davinci-editors-davinci/model-experience:
-  en: 54f1c6c4075ab13b
-  zh: 9bd2d70c23b04ae5
+  en: dbcb1310933f18bd
+  zh: 373fffde791bbac6
 /deepseek-ai-dsh-davinci-editors-davinci/known-limitations-and-deferred-work:
   en: c13860ed380bd6db
   zh: 1fef83489864fcc5

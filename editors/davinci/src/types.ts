@@ -392,3 +392,33 @@ export interface DavinciScreenshotInfo {
   /** Absolute path of the written PNG. */
   readonly path: string
 }
+
+/** Result of duplicating the current timeline into a `_待审` working copy. */
+export interface DavinciTimelineBeginInfo {
+  /** Name of the timeline the copy was made from. */
+  readonly originalName: string
+  /** Name of the duplicated working copy. */
+  readonly workingName: string
+  readonly originalStartFrame: number | undefined
+  readonly originalEndFrame: number | undefined
+  readonly workingStartFrame: number | undefined
+  readonly workingEndFrame: number | undefined
+  readonly done: boolean
+}
+
+/**
+ * Result of finishing a timeline edit. `approved: false` keeps the `_待审`
+ * copy and changes nothing; `done` is then false. `approved: true` renames the
+ * original to its backup name and the copy back to the original name.
+ */
+export interface DavinciTimelineFinalizeInfo {
+  readonly approved: boolean
+  readonly done: boolean
+  readonly originalName: string
+  readonly workingName: string
+  readonly backupName: string | undefined
+  /** Whether the original timeline is disabled; false until a UI helper exists. */
+  readonly originalDisabled: boolean
+  /** Human-readable follow-up when the original still needs a manual disable. */
+  readonly warning: string | undefined
+}

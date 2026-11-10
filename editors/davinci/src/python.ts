@@ -457,6 +457,170 @@ print('timeline_index=' + s(target_index))
 }
 
 /**
+ * Body starting a timeline edit: duplicate the current timeline through
+ * `MediaPool:DuplicateTimeline`, rename the copy to `<name><suffix>`, and make
+ * it current. The original is never edited. A failed rename or switch removes
+ * the just-created copy so the project is left as it was.
+ * @param workingSuffix - policy suffix appended to the copied timeline.
+ * @returns Python source for {@link pythonScriptOf}.
+ */
+export function beginTimelineEditPython(workingSuffix: string): string {
+  return `
+suffix = ${JSON.stringify(workingSuffix)}
+t = current_timeline()
+if t is None:
+    return
+name = s(t.GetName())
+if suffix != '' and name.endswith(suffix):
+    print('ERROR api-failed: "' + name + '" is already a working copy; finish it before starting another edit')
+    return
+original_start = None
+original_end = None
+try:
+    original_start = t.GetStartFrame()
+    original_end = t.GetEndFrame()
+except Exception:
+    pass
+pool = project.GetMediaPool()
+copy = t.DuplicateTimeline()
+if copy is None:
+    print('ERROR api-failed: MediaPool:DuplicateTimeline returned nothing for "' + name + '"')
+    return
+working = name + suffix
+if s(copy.GetName()) != working:
+    if not copy.SetName(working):
+        try:
+            pool.DeleteTimelines([copy])
+        except Exception:
+            pass
+        print('ERROR api-failed: duplicated "' + name + '" but could not rename the copy to "' + working + '"')
+        return
+if not project.SetCurrentTimeline(copy):
+    try:
+        pool.DeleteTimelines([copy])
+    except Exception:
+        pass
+    print('ERROR api-failed: duplicated "' + name + '" as "' + working + '" but could not switch to it')
+    return
+working_start = None
+working_end = None
+try:
+    working_start = copy.GetStartFrame()
+    working_end = copy.GetEndFrame()
+except Exception:
+    pass
+print('original_name=' + name)
+print('working_name=' + working)
+print('original_start=' + s(original_start))
+print('original_end=' + s(original_end))
+print('working_start=' + s(working_start))
+print('working_end=' + s(working_end))
+print('done=true')
+`
+}
+
+/**
+ * Body reading the current working-copy state before finalize computes the
+ * backup name. Refuses when the current timeline is not a `<name><suffix>`
+ * copy or its original is missing.
+ * @param workingSuffix - policy suffix.
+ * @returns Python source for {@link pythonScriptOf}.
+ */
+export function timelineEditStatePython(workingSuffix: string): string {
+  return `
+suffix = ${JSON.stringify(workingSuffix)}
+t = current_timeline()
+if t is None:
+    return
+name = s(t.GetName())
+if suffix == '' or not name.endswith(suffix):
+    print('ERROR api-failed: the current timeline "' + name + '" is not a working copy ending in "' + suffix + '"')
+    return
+original_name = name[:-len(suffix)]
+original = None
+for i in range(1, project.GetTimelineCount() + 1):
+    candidate = project.GetTimelineByIndex(i)
+    if candidate is not None and s(candidate.GetName()) == original_name:
+        original = candidate
+        break
+if original is None:
+    print('ERROR timeline-not-found: no original timeline named "' + original_name + '"')
+    return
+print('original_name=' + original_name)
+print('working_name=' + name)
+print('done=true')
+`
+}
+
+/**
+ * Body finishing a timeline edit. Rejection keeps the `_待审` copy and changes
+ * nothing. Approval renames the original to its backup name and the copy back
+ * to the original name; a failed second rename restores the first. Resolve has
+ * no scripting API to disable a timeline, so the original stays enabled and the
+ * result carries a manual-disable warning.
+ *
+ * Nothing is ever deleted: both timelines remain in the project, one under the
+ * original name and one under the timestamped backup name.
+ * @param approved - whether the user passed the review.
+ * @param workingSuffix - policy suffix identifying the copy.
+ * @param backupName - timestamped name for the original timeline.
+ * @param disableOriginal - whether to report that a manual disable is needed.
+ * @returns Python source for {@link pythonScriptOf}.
+ */
+export function finalizeTimelineEditPython(
+  approved: boolean,
+  workingSuffix: string,
+  backupName: string,
+  disableOriginal: boolean,
+): string {
+  return `
+suffix = ${JSON.stringify(workingSuffix)}
+backup = ${JSON.stringify(backupName)}
+approved = ${approved ? 'True' : 'False'}
+disable_expected = ${disableOriginal ? 'True' : 'False'}
+t = current_timeline()
+if t is None:
+    return
+name = s(t.GetName())
+if suffix == '' or not name.endswith(suffix):
+    print('ERROR api-failed: the current timeline "' + name + '" is not a working copy ending in "' + suffix + '"')
+    return
+original_name = name[:-len(suffix)]
+original = None
+for i in range(1, project.GetTimelineCount() + 1):
+    candidate = project.GetTimelineByIndex(i)
+    if candidate is not None and s(candidate.GetName()) == original_name:
+        original = candidate
+        break
+if original is None:
+    print('ERROR timeline-not-found: no original timeline named "' + original_name + '"')
+    return
+if not approved:
+    print('approved=false')
+    print('done=false')
+    print('original_name=' + original_name)
+    print('working_name=' + name)
+    print('original_disabled=false')
+    return
+if not original.SetName(backup):
+    print('ERROR api-failed: could not rename the original timeline "' + original_name + '" to "' + backup + '"')
+    return
+if not t.SetName(original_name):
+    original.SetName(original_name)
+    print('ERROR api-failed: renamed the original to "' + backup + '" but could not rename the copy to "' + original_name + '"; the original name was restored')
+    return
+print('approved=true')
+print('done=true')
+print('original_name=' + backup)
+print('working_name=' + original_name)
+print('backup_name=' + backup)
+print('original_disabled=false')
+if disable_expected:
+    print('warning=Resolve 没有禁用时间线的脚本 API；原时间线已改名保留但仍是启用状态，请在时间线列表右键选择「禁用时间线」。')
+`
+}
+
+/**
  * Body placing a bin clip onto a video track at a record frame. Resolve
  * 21.1.1.10's scripting surface exposes only `MediaPool:AppendToTimeline` for
  * clip placement; the documented `InsertToTimeline` / `ReplaceToTimeline` are

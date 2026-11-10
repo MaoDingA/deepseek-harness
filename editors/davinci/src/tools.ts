@@ -1,10 +1,11 @@
 /**
- * Model-facing Consumer surface of the `ctx.davinci` seam: the twenty-two
- * `resolve_*` tools (project info, media pool, timeline items, find-by-tc,
- * find-clip, seek, screenshot, switch-timeline, place, place-ui, delete,
- * marker, audio items, render status, render presets, add/load/delete render
- * jobs, render control, placement plan, and placement check) plus the
- * system-prompt section teaching the editing conventions. Mutating tools gate
+ * Model-facing Consumer surface of the `ctx.davinci` seam: the twenty-six
+ * `resolve_*` tools (project info, project conventions, timeline working-copy
+ * begin/finalize, media pool, timeline items, find-by-tc, find-clip, seek,
+ * screenshot, switch-timeline, place, place-ui, delete, marker, audio items,
+ * render status, render presets, add/load/delete render jobs, render control,
+ * placement plan, and placement check) plus the system-prompt section teaching
+ * the editing conventions. Mutating tools gate
  * through the approval seam before anything executes — the approval prompt is
  * how the user consents.
  * @module @deepseek-ai/dsh-davinci/tools
@@ -18,8 +19,10 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 // augmentation. The seam stays optional at runtime.
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { DAVINCI_MARKER_COLORS } from './markers.ts'
-import { TRANSPORT_GRACE_MS, discoverResolveMcp, type Config } from './provider.ts'
+import { TRANSPORT_GRACE_MS, defaultConventionsDir, discoverResolveMcp, type Config } from './provider.ts'
 import { scriptTimeoutSeconds } from './protocol.ts'
+import { defaultConventions } from './conventions.ts'
+import type { DavinciProjectConventionsInfo } from './conventions.ts'
 import type {
   DavinciAudioTimelineItemsInfo,
   DavinciCallRequest,
@@ -35,6 +38,8 @@ import type {
   DavinciRenderStatusInfo,
   DavinciResult,
   DavinciSeekInfo,
+  DavinciTimelineBeginInfo,
+  DavinciTimelineFinalizeInfo,
   DavinciTimelineItemsInfo,
   DavinciTimelineSwitchInfo,
 } from './types.ts'
@@ -106,6 +111,8 @@ const RESOLVE_SECTION = `DaVinci Resolve editing conventions:
   - 贴视效 (VFX layup): project-specific. Before planning, ask the user for the deliverable bin, naming/TC convention, target track (default V2), handles, and whether to replace or overlay; then resolve_plan_vfx_placement -> resolve_place_clip_ui -> resolve_verify_placement. resolve_place_clip only appends to the tail and rolls back; do not use it for positioned layups.
   - 输出 (output): project-specific. Before enqueuing, ask the user for the deliverable format/codec or preset, target directory, naming, per-reel vs master, leader inclusion, and the QC checklist; then confirm with resolve_render_status / resolve_render_presets and use the render tools.
   - Never guess a project convention. If it is not already in the conversation, ask the user with ask_user_question; when no user channel exists (headless), stop and report the missing conventions instead of guessing. State any default you use explicitly.
+- Project conventions: call resolve_project_conventions before a 套片/贴视效/输出 workflow. Ask the user the returned questions once at project start (not every session) and save the answers with resolve_save_project_conventions; reuse them for the rest of the project.
+- Timeline edits: call resolve_begin_timeline_edit FIRST. It duplicates the current timeline to "<name>_待审" and switches to the copy; never edit the original. After the edit, ask the user in Chinese "是否检查通过？" and pass the answer to resolve_finalize_timeline_edit. Rejection keeps the copy. Approval renames the original to "__OLD_<timestamp>" and the copy back to the original name; both are kept. Resolve has no scripting API to disable a timeline, so the finalize result warns that the original must be disabled manually (右键 → 禁用时间线).
 - Mutating tools (place/place-ui/delete/marker/render-queue/render-control) are approval-gated one-shot: the approval prompt is how the user consents, so never detour through chat to ask permission first, and never retry a rejected mutation unchanged.
 - After any mutation, re-read the affected state with resolve_timeline_items or resolve_render_status to confirm the result before reporting success.`
 
@@ -339,8 +346,44 @@ function deleteRenderJobText(info: DavinciMutationInfo & { readonly jobId: strin
   ].join('\n')
 }
 
+function conventionsText(info: DavinciProjectConventionsInfo): string {
+  const lines = [
+    `project=${info.project}`,
+    `path=${info.path}`,
+    JSON.stringify(info.conventions, null, 2),
+  ]
+  if (info.missing.length > 0) {
+    lines.push(`missing (${info.missing.length}): ${info.missing.join(', ')}`)
+    for (const question of info.questions) lines.push(`ask: ${question.field} — ${question.question}`)
+  } else {
+    lines.push('missing: none')
+  }
+  return lines.join('\n')
+}
+
+function beginTimelineEditText(info: DavinciTimelineBeginInfo): string {
+  return [
+    `original="${info.originalName}" [${info.originalStartFrame ?? '?'}-${info.originalEndFrame ?? '?'}]`,
+    `working="${info.workingName}" [${info.workingStartFrame ?? '?'}-${info.workingEndFrame ?? '?'}]`,
+    'current=working',
+  ].join('\n')
+}
+
+function finalizeTimelineEditText(info: DavinciTimelineFinalizeInfo): string {
+  const lines = [
+    `approved=${info.approved}`,
+    `done=${info.done}`,
+    `old_timeline="${info.originalName}"`,
+    `new_timeline="${info.workingName}"`,
+  ]
+  if (info.backupName !== undefined) lines.push(`backup_name="${info.backupName}"`)
+  lines.push(`original_disabled=${info.originalDisabled}`)
+  if (info.warning !== undefined) lines.push(`warning=${info.warning}`)
+  return lines.join('\n')
+}
+
 /**
- * Register the nineteen `resolve_*` tools and the editing-conventions prompt
+ * Register the twenty-six `resolve_*` tools and the editing-conventions prompt
  * section on a context that already provides `ctx.tools` and
  * `ctx.systemPrompt`.
  * @param ctx - plugin context owning the registrations.
@@ -365,6 +408,146 @@ export function registerDavinciTools(ctx: Context, config: Config): void {
     timeoutMs: fastDeadlineMs,
     async execute(_args, exec) {
       return resultText(await ctx.davinci.projectInfo(callEnvelope(exec, fastBudgetMs)), projectInfoText)
+    },
+  }))
+
+  const conventionsDir = config.conventionsDir ?? defaultConventionsDir()
+
+  ctx.tools.register(defineTool({
+    name: 'resolve_project_conventions',
+    description:
+      'Read the current project\'s IO conventions: frame rate, conform defaults, VFX layup conventions, output targets, and the timeline working-copy policy. Returns the stored/merged document, the fields still missing, and the Chinese questions to ask. VFX and output fields are project-specific: ask them once at project start, save with resolve_save_project_conventions, and reuse them for the rest of the project. Read-only.',
+    parameters: {},
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    timeoutMs: fastDeadlineMs,
+    async execute(_args, exec) {
+      return resultText(
+        await ctx.davinci.projectConventions(conventionsDir, callEnvelope(exec, fastBudgetMs)),
+        conventionsText,
+      )
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'resolve_save_project_conventions',
+    description:
+      'Merge partial project-convention answers into one project document and write it atomically. Only provide fields whose answers you have; absent fields stay unchanged. VFX and output fields are asked once at project start, not every session. Approval-gated: the approval prompt is how the user consents — do not ask in chat first.',
+    parameters: {
+      frameRate: { type: 'number', description: 'Project frame rate, e.g. 24 or 23.976' },
+      dropFrame: { type: 'boolean', description: 'Whether timecode is drop-frame' },
+      conform: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'Conform (套片) conventions',
+        properties: {
+          workprintPattern: { type: 'string', description: 'WP/workprint timeline name pattern' },
+          targetTrack: { type: 'number', description: '1-based target video track (default 1)' },
+          audio: { type: 'string', enum: ['ignore', 'keep'], description: 'Ignore or keep source audio' },
+          multiSegment: { type: 'boolean', description: 'Allow one shot to use several source ranges' },
+          sourceMatch: { type: 'string', enum: ['source-tc'], description: 'Source matching strategy' },
+          handles: { type: 'number', description: 'Source handles in frames' },
+        },
+      },
+      vfx: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'VFX layup (贴视效) conventions',
+        properties: {
+          bin: { type: 'string', description: 'Media-pool bin holding deliverables' },
+          targetTrack: { type: 'number', description: '1-based target video track' },
+          markerColor: { type: 'string', enum: DAVINCI_MARKER_COLORS, description: 'Marker color' },
+          anchor: { type: 'string', enum: ['record-tc', 'source-tc'], description: 'Placement anchor' },
+          handles: { type: 'number', description: 'Handles in frames' },
+          namePattern: { type: 'string', description: 'Deliverable naming pattern' },
+        },
+      },
+      output: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'Output (输出) conventions',
+        properties: {
+          preset: { type: 'string', description: 'Render preset name' },
+          format: { type: 'string', description: 'Container/format, e.g. mov' },
+          codec: { type: 'string', description: 'Codec, e.g. ProRes 422 HQ' },
+          directory: { type: 'string', description: 'Absolute output directory' },
+          namePattern: { type: 'string', description: 'Output file naming pattern' },
+        },
+      },
+      timelinePolicy: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'Timeline working-copy policy',
+        properties: {
+          workingSuffix: { type: 'string', description: 'Working-copy suffix (default _待审)' },
+          backupSuffixFormat: { type: 'string', description: 'Backup suffix format (default __OLD_YYYYMMDD_HHmm)' },
+          disableOriginal: { type: 'boolean', description: 'Disable the original after approval' },
+          keepCopy: { type: 'boolean', description: 'Keep the copy when review is rejected' },
+          review: { type: 'string', enum: ['zh'], description: 'Review language' },
+        },
+      },
+      notes: { type: 'string', description: 'Free-form project notes' },
+    },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    timeoutMs: fastDeadlineMs,
+    async execute(args, exec) {
+      await requireWriteApproval({
+        approval: ctx.get('approval'),
+        preApproved: config.autoApproveMutations,
+        exec,
+        reason: 'save the current project\'s IO conventions',
+      })
+      return resultText(
+        await ctx.davinci.saveProjectConventions(conventionsDir, args, callEnvelope(exec, fastBudgetMs)),
+        conventionsText,
+      )
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'resolve_begin_timeline_edit',
+    description:
+      'Start an edit safely: duplicate the current timeline through MediaPool:DuplicateTimeline, rename the copy to "<name>_待审", and switch to it. The original is not edited; a failed rename/switch removes the new copy. Call this before any timeline-changing workflow, then perform the edit on the copy. Approval-gated: the approval prompt is how the user consents — do not ask in chat first.',
+    parameters: {},
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    timeoutMs: fastDeadlineMs,
+    async execute(_args, exec) {
+      const envelope = callEnvelope(exec, fastBudgetMs)
+      const conventions = await ctx.davinci.projectConventions(conventionsDir, envelope)
+      const suffix = conventions.ok ? conventions.data.conventions.timelinePolicy.workingSuffix : '_待审'
+      await requireWriteApproval({
+        approval: ctx.get('approval'),
+        preApproved: config.autoApproveMutations,
+        exec,
+        reason: `duplicate the current timeline as a "${suffix}" working copy`,
+      })
+      return resultText(await ctx.davinci.beginTimelineEdit(suffix, envelope), beginTimelineEditText)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'resolve_finalize_timeline_edit',
+    description:
+      'Finish a working-copy edit after the user reviews it. approved=false keeps the "_待审" copy and changes nothing. approved=true renames the original to "__OLD_<timestamp>" and the copy back to the original name; both timelines are kept. Resolve has no scripting API to disable a timeline, so the original stays enabled and the result carries a manual-disable warning (右键 → 禁用时间线). Approval-gated when approved=true.',
+    parameters: {
+      approved: { type: 'boolean', required: true, description: 'The user\'s review decision' },
+    },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    timeoutMs: fastDeadlineMs,
+    async execute(args, exec) {
+      const envelope = callEnvelope(exec, fastBudgetMs)
+      const conventions = await ctx.davinci.projectConventions(conventionsDir, envelope)
+      const policy = conventions.ok
+        ? conventions.data.conventions.timelinePolicy
+        : defaultConventions('').timelinePolicy
+      if (args.approved) {
+        await requireWriteApproval({
+          approval: ctx.get('approval'),
+          preApproved: config.autoApproveMutations,
+          exec,
+          reason: `finalize the review: rename the original to "${policy.backupSuffixFormat}" backup and the copy to the original name`,
+        })
+      }
+      return resultText(await ctx.davinci.finalizeTimelineEdit(args.approved, policy, envelope), finalizeTimelineEditText)
     },
   }))
 

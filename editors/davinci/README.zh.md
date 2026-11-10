@@ -13,7 +13,7 @@ src/protocol.ts  纯协议层：run_script 内层响应映射、ERROR <code>: <m
 src/python.ts    Python 脚本体：共享 prelude（s()/each()、名义帧率与丢帧时间码换算）+ 每操作一个 body + unsafe 截图体
 src/service.ts   抽象 DavinciService：ctx key 合并、resolve() 默认化、类型化领域方法、截图门
 src/provider.ts  McpDavinci：每调用一次性 node 进程跑 MCP stdio 交换、路径自动发现、传输超时/中止
-src/tools.ts     22 个 resolve_* 工具 + systemPrompt 剪辑约定节 + 审批门 + 每工具预算/截止时间
+src/tools.ts     26 个 resolve_* 工具 + systemPrompt 剪辑约定节 + 审批门 + 每工具预算/截止时间
 src/index.ts     插件入口：name/inject/Config/apply
 ```
 
@@ -23,11 +23,15 @@ src/index.ts     插件入口：name/inject/Config/apply
 
 内层响应映射（`protocol.ts` 的 `innerResponseToRaw`）：`{"output": …}` 原样透传给 kv 解析；`{"error": …}` 以 `Script timed out` 开头 → `timeout`（原文保留），其余（Traceback/SyntaxError）→ `api-failed`（取异常末行）；JSON-RPC 层 error（如 ResolveMCP 二进制 init 失败 -32603）、进程崩溃、以及既无 `output` 也无 `error` 的信封 → `spawn-failed`。stdout 读取按 id 过滤（initialize 会触发 `notifications/message` 通知行）。
 
-## 工具面（22 个）
+## 工具面（26 个）
 
 | 工具 | 类型 | 说明 |
 |---|---|---|
 | `resolve_project_info` | 读 | 版本、工程名、全部时间线、当前时间线轨道/帧范围 |
+| `resolve_project_conventions` | 读 | 当前工程的 IO 约定（帧率、套片、视效、输出、时间线策略）、仍缺字段与要问的中文问题；视效/输出在项目开始时问一次 |
+| `resolve_save_project_conventions` | 写·审批 | 把部分约定答案合并后原子写入 `$DSH_HOME/davinci/projects/<project>.json`；校验先于写入 |
+| `resolve_begin_timeline_edit` | 写·审批 | 复制当前时间线为 `<原名>_待审` 并切到副本，原时间线不动；改名/切换失败会删掉新副本 |
+| `resolve_finalize_timeline_edit` | 写·审批 | 不通过则保留副本；通过则原线改名 `__OLD_YYYYMMDD_HHmm`、副本改回原名，并报告“需手动禁用原线”的提醒（Resolve 无禁用时间线脚本 API） |
 | `resolve_media_pool` | 读 | 列 bin 与素材（名、源 Start TC、时长、fps、路径）；单次最多 200 个 bin 与 200 条素材，并报告目录总数 |
 | `resolve_timeline_items` | 读 | 视频轨条目列表，可按记录帧窗口分页（单次上限 200） |
 | `resolve_find_by_tc` | 读 | 按源 TC 全轨确定性扫描 V1，VFX 交付物对位首选；支持丢帧 `;` 时间码 |
@@ -76,6 +80,7 @@ src/index.ts     插件入口：name/inject/Config/apply
 | `defaultTimeoutMs` | 30000 | 快读/快写脚本预算；也是各工具截止时间的基数 |
 | `maxTimeoutMs` | 60000 | 全工程扫描与贴片段的脚本预算，同时是任何请求预算的上限；`run_script` 沙箱自身硬上限 60s，超出部分在交换时按 60s 封顶 |
 | `screenshotDir` | `.resolve-agent` | 截图输出目录：绝对路径，或相对调用会话的工作目录（由工具在调用前解析） |
+| `conventionsDir` | `$DSH_HOME/davinci/projects` | 按项目约定根目录；`DSH_HOME` 未设时默认 `~/.dsh/davinci/projects` |
 | `autoApproveMutations` | `false` | 部署级预授权：跳过本插件写工具的审批门（显式信任决策，不动其他工具） |
 
 超时与取消：每个工具调用都携带 `{ timeoutMs, signal: exec.signal }`，工具级超时/取消会中止已启动的交换，而不是任其继续跑。请求预算在 [1s, default, max] 内钳制后，按 `Math.ceil` 换算为整数秒并夹进 `run_script` 的 [1,60]；provider 墙钟 = 该整数秒预算 + 5s 传输余量，工具自身截止时间再晚 2s，保证模型先拿到 `ERROR [timeout]` 编码文本而不是通用工具超时。脚本超时以正常 result 文本到达并映射为 `timeout` 失败码（消息为沙箱原文），与旧 fuscript 时代的 killed/ETIMEDOUT 超时提示文案不同——模型可见差异，属迁移已知变更。
@@ -96,11 +101,11 @@ src/index.ts     插件入口：name/inject/Config/apply
 
 ## 测试
 
-`editors/davinci/tests/`（已并入根 vitest 收集范围）：协议解析与投影（含 `id_source`→`idSource`、`ambiguous-job` 失败码、字面值 `nil`、200 行上限）、`innerResponseToRaw` 内层响应映射（timeout/Traceback/SyntaxError/非 JSON/无 output 信封 fail-loud）、timeout 钳制与秒换算、ResolveMCP 发现排序、审批门全部非授权路径、真实 Context 组合下 22 工具注册、`addRenderJobText` 的 `读回确认` 标注与队列深度缺省、非丢帧/29.97 丢帧时间码往返、预设名校验、贴片单/质检投影、截图 coded 拒绝/成功；传输层用临时 fake MCP 服务器（FAKE_MODE 驱动）覆盖成功交换（含通知行过滤）、内层超时、内层 Traceback、RPC error、进程崩溃、非内层 JSON（wrapper isError）、墙钟超时击杀、调用方中止，以及 add/delete 渲染任务走真实 stdio 传输的读回确认与 `ambiguous-job` 拒绝；`python.spec.ts` 锁定 prelude 的 s()/each() 契约与生成体结构（含快照先于调用、重试上界、无 clear-queue 回退、append 前全量快照回滚），并在有 python3 的机器上对全部生成体做 ast.parse 语法校验，另以 fake `project`（队列快照逐次消耗、变更全量记录）真实执行 add/delete 渲染体，覆盖空串→读回确认、多候选→报错且不重试、无新增→仅重试一次、两次落空→报错、直接返回/字典返回、预读失败拒入队、AddRenderJob 抛异常不重试、删除读回确认、删除目标不存在/空队列/空 ID 不触发宿主删除、删除"成功"但仍在职队→报错、删除抛异常、删除后读回失败等分支（无 python3 时跳过）。包 tsconfig 走 project references（已加入 `tsconfig.host.json`）。
+`editors/davinci/tests/`（已并入根 vitest 收集范围）：协议解析与投影（含 `id_source`→`idSource`、`ambiguous-job` 失败码、字面值 `nil`、200 行上限）、`innerResponseToRaw` 内层响应映射（timeout/Traceback/SyntaxError/非 JSON/无 output 信封 fail-loud）、timeout 钳制与秒换算、ResolveMCP 发现排序、审批门全部非授权路径、真实 Context 组合下 26 工具注册、`addRenderJobText` 的 `读回确认` 标注与队列深度缺省、非丢帧/29.97 丢帧时间码往返、预设名校验、贴片单/质检投影、截图 coded 拒绝/成功；传输层用临时 fake MCP 服务器（FAKE_MODE 驱动）覆盖成功交换（含通知行过滤）、内层超时、内层 Traceback、RPC error、进程崩溃、非内层 JSON（wrapper isError）、墙钟超时击杀、调用方中止，以及 add/delete 渲染任务走真实 stdio 传输的读回确认与 `ambiguous-job` 拒绝；`python.spec.ts` 锁定 prelude 的 s()/each() 契约与生成体结构（含快照先于调用、重试上界、无 clear-queue 回退、append 前全量快照回滚），并在有 python3 的机器上对全部生成体做 ast.parse 语法校验，另以 fake `project`（队列快照逐次消耗、变更全量记录）真实执行 add/delete 渲染体，覆盖空串→读回确认、多候选→报错且不重试、无新增→仅重试一次、两次落空→报错、直接返回/字典返回、预读失败拒入队、AddRenderJob 抛异常不重试、删除读回确认、删除目标不存在/空队列/空 ID 不触发宿主删除、删除"成功"但仍在职队→报错、删除抛异常、删除后读回失败等分支（无 python3 时跳过）。包 tsconfig 走 project references（已加入 `tsconfig.host.json`）。
 
 ## Model Experience
 
-- 模型看到：systemPrompt 的剪辑约定节（order 120）+ 22 个工具 schema 与描述；工具结果为格式化文本（失败带 `ERROR [code] message`）。
+- 模型看到：systemPrompt 的剪辑约定节（order 120）+ 26 个工具 schema 与描述；工具结果为格式化文本（失败带 `ERROR [code] message`）。
 - Token 效应：工具 schema 每请求常驻；约定节约 6 行。
 - KV Cache 效应：注册集合稳定时前缀稳定。
 

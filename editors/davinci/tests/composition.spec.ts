@@ -6,6 +6,10 @@ import * as Davinci from '../src/index.ts'
 
 const TOOL_NAMES = [
   'resolve_project_info',
+  'resolve_project_conventions',
+  'resolve_save_project_conventions',
+  'resolve_begin_timeline_edit',
+  'resolve_finalize_timeline_edit',
   'resolve_media_pool',
   'resolve_timeline_items',
   'resolve_find_by_tc',

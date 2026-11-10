@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest'
 import {
   addRenderJobFrom,
   audioTimelineItemsFrom,
+  beginTimelineEditFrom,
   clampTimeout,
   deleteRenderJobFrom,
   findByTcFrom,
+  finalizeTimelineEditFrom,
   findClipFrom,
   innerResponseToRaw,
   loadRenderPresetFrom,
@@ -500,5 +502,87 @@ describe('innerResponseToRaw', () => {
   it('fails loud on a non-inner-JSON reply, naming the tool', () => {
     expect(() => innerResponseToRaw('run_script_unsafe', 'Error: DaVinci Resolve Studio is not installed'))
       .toThrow(/run_script_unsafe response was not inner JSON.*DaVinci Resolve Studio is not installed/)
+  })
+})
+
+describe('timeline working-copy projections', () => {
+  it('projects the begin result with frame ranges', () => {
+    const result = beginTimelineEditFrom(new Map([
+      ['original_name', '第一本'],
+      ['working_name', '第一本_待审'],
+      ['original_start', '90000'],
+      ['original_end', '158450'],
+      ['working_start', '90000'],
+      ['working_end', '158450'],
+      ['done', 'true'],
+    ]))
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        originalName: '第一本',
+        workingName: '第一本_待审',
+        originalStartFrame: 90000,
+        originalEndFrame: 158450,
+        workingStartFrame: 90000,
+        workingEndFrame: 158450,
+        done: true,
+      },
+    })
+  })
+
+  it('fails a begin that did not create a working copy', () => {
+    const result = beginTimelineEditFrom(new Map([['done', 'false']]))
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('api-failed')
+  })
+
+  it('projects an approved finalize and its manual-disable warning', () => {
+    const result = finalizeTimelineEditFrom(new Map([
+      ['approved', 'true'],
+      ['done', 'true'],
+      ['original_name', '第一本__OLD_20261109_1823'],
+      ['working_name', '第一本'],
+      ['backup_name', '第一本__OLD_20261109_1823'],
+      ['original_disabled', 'false'],
+      ['warning', '右键 → 禁用时间线'],
+    ]))
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data).toMatchObject({
+        approved: true,
+        done: true,
+        originalName: '第一本__OLD_20261109_1823',
+        workingName: '第一本',
+        originalDisabled: false,
+        warning: '右键 → 禁用时间线',
+      })
+    }
+  })
+
+  it('keeps a rejected review as a successful no-op', () => {
+    const result = finalizeTimelineEditFrom(new Map([
+      ['approved', 'false'],
+      ['done', 'false'],
+      ['original_name', '第一本'],
+      ['working_name', '第一本_待审'],
+    ]))
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        approved: false,
+        done: false,
+        originalName: '第一本',
+        workingName: '第一本_待审',
+        backupName: undefined,
+        originalDisabled: false,
+        warning: undefined,
+      },
+    })
+  })
+
+  it('fails an approved finalize that did not complete', () => {
+    const result = finalizeTimelineEditFrom(new Map([['approved', 'true'], ['done', 'false']]))
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('api-failed')
   })
 })

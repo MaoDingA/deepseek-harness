@@ -13,9 +13,11 @@ import { dirname, join, resolve as resolvePath } from 'node:path'
 import {
   addMarkerPython,
   addRenderJobPython,
+  beginTimelineEditPython,
   audioTimelineItemsPython,
   deleteItemPython,
   deleteRenderJobPython,
+  finalizeTimelineEditPython,
   findByTcPython,
   findClipPython,
   loadRenderPresetPython,
@@ -33,13 +35,16 @@ import {
   startRenderingPython,
   stopRenderingPython,
   switchTimelinePython,
+  timelineEditStatePython,
   timelineItemsPython,
 } from './python.ts'
 import {
   addRenderJobFrom,
   audioTimelineItemsFrom,
+  beginTimelineEditFrom,
   deleteRenderJobFrom,
   findByTcFrom,
+  finalizeTimelineEditFrom,
   findClipFrom,
   loadRenderPresetFrom,
   mediaPoolFrom,
@@ -55,6 +60,20 @@ import {
   switchTimelineFrom,
   timelineItemsFrom,
 } from './protocol.ts'
+import {
+  conventionQuestions,
+  formatBackupName,
+  loadConventions,
+  mergeConventions,
+  missingConventionFields,
+  writeConventions,
+} from './conventions.ts'
+import type {
+  DavinciProjectConventions,
+  DavinciProjectConventionsInfo,
+  DavinciProjectConventionsPatch,
+  DavinciTimelinePolicy,
+} from './conventions.ts'
 import type {
   DavinciAddRenderJobRequest,
   DavinciAudioTimelineItemsInfo,
@@ -81,6 +100,8 @@ import type {
   DavinciScriptTool,
   DavinciSeekInfo,
   DavinciSpec,
+  DavinciTimelineBeginInfo,
+  DavinciTimelineFinalizeInfo,
   DavinciTimelineItemsInfo,
   DavinciTimelineSwitchInfo,
   DavinciUiPlacementRequest,
@@ -540,6 +561,123 @@ export abstract class DavinciService extends Service {
       return { ok: false, code: 'api-failed', message: 'the capture script reported no file path' }
     }
     return { ok: true, data: { path: captured } }
+  }
+
+  /**
+   * Read the current project's conventions document (or defaults), the fields
+   * still unanswered, and the Chinese questions that resolve them. The read
+   * first resolves the current project through {@link projectInfo}, so a
+   * missing project fails with that coded result.
+   * @param directory - conventions root (the configured `conventionsDir`).
+   * @param request - call envelope.
+   * @returns the merged document, its path, missing fields, and questions.
+   */
+  async projectConventions(
+    directory: string,
+    request: DavinciCallRequest = {},
+  ): Promise<DavinciResult<DavinciProjectConventionsInfo>> {
+    const info = await this.projectInfo(request)
+    if (!info.ok) return info
+    try {
+      const loaded = loadConventions(directory, info.data.projectName)
+      const missing = missingConventionFields(loaded.conventions)
+      return {
+        ok: true,
+        data: {
+          project: info.data.projectName,
+          path: loaded.path,
+          conventions: loaded.conventions,
+          missing,
+          questions: conventionQuestions(missing),
+        },
+      }
+    } catch (error) {
+      return { ok: false, code: 'api-failed', message: errorMessage(error) }
+    }
+  }
+
+  /**
+   * Merge partial project-convention answers into the current project's
+   * document and write it atomically. Validation happens before the write, so
+   * an invalid value leaves the stored document unchanged.
+   * @param directory - conventions root.
+   * @param patch - partial answers from the user.
+   * @param request - call envelope.
+   * @returns the merged document and the remaining missing fields.
+   */
+  async saveProjectConventions(
+    directory: string,
+    patch: DavinciProjectConventionsPatch | Record<string, unknown>,
+    request: DavinciCallRequest = {},
+  ): Promise<DavinciResult<DavinciProjectConventionsInfo>> {
+    const info = await this.projectInfo(request)
+    if (!info.ok) return info
+    try {
+      const loaded = loadConventions(directory, info.data.projectName)
+      const merged: DavinciProjectConventions = mergeConventions(loaded.conventions, patch)
+      const path = writeConventions(directory, merged)
+      const missing = missingConventionFields(merged)
+      return {
+        ok: true,
+        data: {
+          project: info.data.projectName,
+          path,
+          conventions: merged,
+          missing,
+          questions: conventionQuestions(missing),
+        },
+      }
+    } catch (error) {
+      return { ok: false, code: 'api-failed', message: errorMessage(error) }
+    }
+  }
+
+  /**
+   * Duplicate the current timeline into a `<name><workingSuffix>` copy and make
+   * the copy current. The original is not edited; on a failed rename or switch
+   * the new copy is removed so the project is unchanged.
+   * @param workingSuffix - project policy suffix (`_待审`).
+   * @param request - call envelope.
+   * @returns the original/copy names and frame ranges.
+   */
+  async beginTimelineEdit(
+    workingSuffix: string,
+    request: DavinciCallRequest = {},
+  ): Promise<DavinciResult<DavinciTimelineBeginInfo>> {
+    return this.run(beginTimelineEditPython(workingSuffix), request, beginTimelineEditFrom)
+  }
+
+  /**
+   * Finish a working-copy edit. Rejection changes nothing and keeps the copy;
+   * approval renames the original to its timestamped backup name and the copy
+   * back to the original name. Both timelines are kept. Resolve has no scripting
+   * API to disable a timeline, so the original stays enabled and the result
+   * carries a manual-disable warning when the policy asks for it.
+   * @param approved - the user's review decision.
+   * @param policy - timeline policy (suffix, backup format, disable expectation).
+   * @param request - call envelope.
+   * @returns the final names and approval state.
+   */
+  async finalizeTimelineEdit(
+    approved: boolean,
+    policy: DavinciTimelinePolicy,
+    request: DavinciCallRequest = {},
+  ): Promise<DavinciResult<DavinciTimelineFinalizeInfo>> {
+    const state = await this.run(timelineEditStatePython(policy.workingSuffix), request, (fields) => {
+      const originalName = fields.get('original_name')
+      const workingName = fields.get('working_name')
+      if (originalName === undefined || originalName === '' || workingName === undefined || workingName === '') {
+        return { ok: false, code: 'api-failed', message: 'the working-copy state did not name both timelines' }
+      }
+      return { ok: true, data: { originalName, workingName } }
+    })
+    if (!state.ok) return state
+    const backup = formatBackupName(state.data.originalName, policy)
+    return this.run(
+      finalizeTimelineEditPython(approved, policy.workingSuffix, backup, policy.disableOriginal),
+      request,
+      finalizeTimelineEditFrom,
+    )
   }
 }
 

@@ -13,7 +13,7 @@ src/protocol.ts  纯协议层：run_script 内层响应映射、ERROR <code>: <m
 src/python.ts    Python 脚本体：共享 prelude（s()/each()、名义帧率与丢帧时间码换算）+ 每操作一个 body + unsafe 截图体
 src/service.ts   抽象 DavinciService：ctx key 合并、resolve() 默认化、类型化领域方法、截图门
 src/provider.ts  McpDavinci：每调用一次性 node 进程跑 MCP stdio 交换、路径自动发现、传输超时/中止
-src/tools.ts     22 个 resolve_* 工具 + systemPrompt 剪辑约定节 + 审批门 + 每工具预算/截止时间
+src/tools.ts     26 个 resolve_* 工具 + systemPrompt 剪辑约定节 + 审批门 + 每工具预算/截止时间
 src/index.ts     插件入口：name/inject/Config/apply
 ```
 
@@ -23,11 +23,15 @@ Absent values print empty and the parser reads empty as absent, so the literal s
 
 Inner response mapping (`innerResponseToRaw` in `protocol.ts`): `{"output": …}` passes through to kv parsing unchanged; an `{"error": …}` starting with `Script timed out` maps to `timeout` (original text kept), anything else (Traceback/SyntaxError) maps to `api-failed` (last exception line taken); a JSON-RPC-layer error (e.g. ResolveMCP binary init failure -32603), a process crash, or an envelope carrying neither `output` nor `error` maps to `spawn-failed`. stdout reading filters by id (initialize triggers `notifications/message` notification lines).
 
-## Tool surface (22 tools)
+## Tool surface (26 tools)
 
 | Tool | Kind | Description |
 |---|---|---|
 | `resolve_project_info` | read | Version, project name, all timelines, current timeline's tracks/frame range |
+| `resolve_project_conventions` | read | Current project's IO conventions (frame rate, conform, VFX, output, timeline policy), the fields still missing, and the Chinese questions to ask; VFX/output are asked once at project start |
+| `resolve_save_project_conventions` | write·approval | Merge partial convention answers into `$DSH_HOME/davinci/projects/<project>.json` atomically; validation happens before the write |
+| `resolve_begin_timeline_edit` | write·approval | Duplicate the current timeline to `<name>_待审`, switch to the copy, and leave the original untouched; a failed rename/switch removes the new copy |
+| `resolve_finalize_timeline_edit` | write·approval | Rejected review keeps the copy; approved review renames the original to `__OLD_YYYYMMDD_HHmm`, the copy to the original name, and reports the manual-disable warning (Resolve has no timeline-disable script API) |
 | `resolve_media_pool` | read | List bins and clips (name, source Start TC, duration, fps, path); at most 200 bins and 200 clips per call, with the folder totals reported |
 | `resolve_timeline_items` | read | Video-track item list, paginable by record-frame window (200 per call cap) |
 | `resolve_find_by_tc` | read | Deterministic full-track V1 scan by source TC; first choice for VFX-deliverable matching; drop-frame `;` TCs are honored |
@@ -76,6 +80,7 @@ Write tools pass through `requireWriteApproval` inside execute before running (o
 | `defaultTimeoutMs` | 30000 | Script budget for fast reads and writes; also the base of each tool's deadline |
 | `maxTimeoutMs` | 60000 | Script budget for whole-project scans and clip placement, and the cap for any requested budget; the `run_script` sandbox's own hard cap is 60s, so anything beyond is clamped to 60s at exchange time |
 | `screenshotDir` | `.resolve-agent` | Screenshot output directory: absolute, or relative to the calling Session's working directory (resolved by the tool before the call) |
+| `conventionsDir` | `$DSH_HOME/davinci/projects` | Per-project conventions root; defaults to `~/.dsh/davinci/projects` when `DSH_HOME` is unset |
 | `autoApproveMutations` | `false` | Deployment-level pre-approval: skips this plugin's write-tool approval gate (an explicit trust decision, leaves other tools untouched) |
 
 Timeout and cancellation: each tool sends `{ timeoutMs, signal: exec.signal }` with every call, so a tool-level timeout or cancellation aborts the spawned exchange instead of letting it run on. The request budget is clamped into [1s, default, max], converted to whole seconds with `Math.ceil`, and clamped into `run_script`'s [1,60]; the provider's wall clock is that whole-second budget + 5s transport grace, and each tool's own deadline sits 2s beyond that, so the coded `ERROR [timeout]` text wins over the generic tool timeout. A script timeout arrives as a normal result text and maps to the `timeout` failure code (message is the sandbox's original text), differing from the old fuscript-era killed/ETIMEDOUT timeout wording — a model-visible difference and a known migration change.
@@ -96,11 +101,11 @@ The packaged Desktop app's `desktop` profile does **not** mount this row: it run
 
 ## Tests
 
-`editors/davinci/tests/` (already in the root vitest collection): protocol parsing and projection (including `id_source`→`idSource`, the `ambiguous-job` failure code, literal `nil` values, and the 200-row caps), `innerResponseToRaw` inner response mapping (timeout/Traceback/SyntaxError/non-JSON and output-less envelopes fail loud), timeout clamping and second conversion, ResolveMCP discovery ordering, every non-authorized approval-gate path, 22-tool registration under a real Context composition, the `读回确认` (read-back confirmed) annotation and the omitted queue depth of `addRenderJobText`, timecode round-trips (non-drop and 29.97 drop-frame), load-preset name validation, placement-plan/check projections, and screenshot coded refusals/success; the transport layer uses a temporary fake MCP server (FAKE_MODE driven) covering successful exchange (including notification-line filtering), inner timeout, inner Traceback, RPC error, process crash, non-inner JSON (wrapper isError), wall-clock kill, caller abort, plus add/delete render job read-back confirmation and `ambiguous-job` refusal through the real stdio transport; `python.spec.ts` locks the prelude's s()/each() contract and generated-body structure (snapshot-before-call, retry bound, no clear-queue fallback, full pre-append snapshot rollback), ast.parse-validates every generated body where python3 exists, and really executes the add/delete render bodies against a fake `project` (queue snapshots consumed per call, mutations fully recorded), covering empty-string→read-back confirm, multi-candidate→error without retry, nothing-added→single retry, two misses→error, direct/dict returns, pre-read failure refusing to enqueue, AddRenderJob raising without retry, delete read-back confirm, delete target-missing/empty-queue/empty-id never touching the host delete, delete "succeeded" but still queued→error, delete raising, and post-delete read-back failure branches (skipped without python3). The package tsconfig uses project references (added to `tsconfig.host.json`).
+`editors/davinci/tests/` (already in the root vitest collection): protocol parsing and projection (including `id_source`→`idSource`, the `ambiguous-job` failure code, literal `nil` values, and the 200-row caps), `innerResponseToRaw` inner response mapping (timeout/Traceback/SyntaxError/non-JSON and output-less envelopes fail loud), timeout clamping and second conversion, ResolveMCP discovery ordering, every non-authorized approval-gate path, 26-tool registration under a real Context composition, the `读回确认` (read-back confirmed) annotation and the omitted queue depth of `addRenderJobText`, timecode round-trips (non-drop and 29.97 drop-frame), load-preset name validation, placement-plan/check projections, and screenshot coded refusals/success; the transport layer uses a temporary fake MCP server (FAKE_MODE driven) covering successful exchange (including notification-line filtering), inner timeout, inner Traceback, RPC error, process crash, non-inner JSON (wrapper isError), wall-clock kill, caller abort, plus add/delete render job read-back confirmation and `ambiguous-job` refusal through the real stdio transport; `python.spec.ts` locks the prelude's s()/each() contract and generated-body structure (snapshot-before-call, retry bound, no clear-queue fallback, full pre-append snapshot rollback), ast.parse-validates every generated body where python3 exists, and really executes the add/delete render bodies against a fake `project` (queue snapshots consumed per call, mutations fully recorded), covering empty-string→read-back confirm, multi-candidate→error without retry, nothing-added→single retry, two misses→error, direct/dict returns, pre-read failure refusing to enqueue, AddRenderJob raising without retry, delete read-back confirm, delete target-missing/empty-queue/empty-id never touching the host delete, delete "succeeded" but still queued→error, delete raising, and post-delete read-back failure branches (skipped without python3). The package tsconfig uses project references (added to `tsconfig.host.json`).
 
 ## Model Experience
 
-- The model sees: the editing-conventions section of systemPrompt (order 120) + the 22 tool schemas and descriptions; tool results are formatted text (failures carry `ERROR [code] message`).
+- The model sees: the editing-conventions section of systemPrompt (order 120) + the 26 tool schemas and descriptions; tool results are formatted text (failures carry `ERROR [code] message`).
 - Token effect: tool schemas ride every request; the conventions section is about 6 lines.
 - KV-cache effect: a stable registration set keeps the prefix stable.
 
